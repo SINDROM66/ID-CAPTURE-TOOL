@@ -1,0 +1,6 @@
+node_modules/
+.gradle/
+.gradle-local/
+.android-sdk-download/
+build/
+local.properties

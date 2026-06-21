@@ -1,0 +1,3 @@
+-keep class ai.onnxruntime.** { *; }
+-keep class org.apache.poi.** { *; }
+-keep class org.openxmlformats.** { *; }

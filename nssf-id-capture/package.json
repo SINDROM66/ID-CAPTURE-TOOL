@@ -1,0 +1,24 @@
+{
+  "name": "nssf-id-capture",
+  "version": "1.0.0",
+  "description": "NSSF SmartLife Flexi — Offline ID Capture & OCR Tool",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve . --listen 5500",
+    "dev": "npx serve . --listen 5500"
+  },
+  "keywords": [
+    "nssf",
+    "uganda",
+    "ocr",
+    "tesseract",
+    "id-capture",
+    "offline"
+  ],
+  "author": "NSSF Uganda — Enterprise & Growth Department",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "serve": "^14.2.6"
+  }
+}

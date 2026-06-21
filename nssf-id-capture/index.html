@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NSSF SmartLife Flexi — ID Capture Tool</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="assets/favicon.ico" type="image/x-icon">
+</head>
+<body>
+
+  <div class="app">
+
+    <!-- HEADER -->
+    <header class="hdr">
+      <div class="hdr-logo">NSSF</div>
+      <div class="hdr-txt">
+        <strong>SmartLife Flexi Enrolment</strong>
+        ID Capture &amp; Data Extraction Tool
+      </div>
+      <div class="offline-badge">
+        <span class="dot"></span> Offline
+      </div>
+    </header>
+
+    <!-- TABS -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="capture" onclick="switchTab('capture')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        Capture
+      </button>
+      <button class="tab" data-tab="records" onclick="switchTab('records')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        Records <span class="tab-badge" id="tab-badge" style="display:none">0</span>
+      </button>
+    </nav>
+
+    <!-- ═══════════════════════════════════════ -->
+    <!--  TAB: CAPTURE                          -->
+    <!-- ═══════════════════════════════════════ -->
+    <section id="tab-capture" class="tab-content active">
+
+      <!-- Upload card -->
+      <div class="card" id="card-upload">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+          Upload ID — Both Sides
+        </h2>
+
+        <div class="upload-pair">
+          <!-- FRONT -->
+          <div class="upload-slot">
+            <div class="uzone" id="zone-front" onclick="document.getElementById('input-front').click()">
+              <div class="uzone-inner" id="zone-front-inner">
+                <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2"/><path d="M22 12H17l-2 4H9L7 12H2"/></svg>
+                <p class="uzone-label">Front of ID</p>
+                <small>Name · NIN · DOB · Expiry</small>
+              </div>
+            </div>
+            <input type="file" id="input-front" accept="image/*" capture="environment" hidden onchange="handleFile('front', this)">
+            <button class="btn btn-outline btn-sm upload-btn" onclick="document.getElementById('input-front').click()">
+              Choose / Take Photo
+            </button>
+          </div>
+
+          <!-- BACK -->
+          <div class="upload-slot">
+            <div class="uzone" id="zone-back" onclick="document.getElementById('input-back').click()">
+              <div class="uzone-inner" id="zone-back-inner">
+                <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>
+                <p class="uzone-label">Back of ID</p>
+                <small>Village · Parish · District</small>
+              </div>
+            </div>
+            <input type="file" id="input-back" accept="image/*" capture="environment" hidden onchange="handleFile('back', this)">
+            <button class="btn btn-outline btn-sm upload-btn" onclick="document.getElementById('input-back').click()">
+              Choose / Take Photo
+            </button>
+          </div>
+        </div>
+
+        <div class="hint">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          Upload both sides for a complete record. Front gives identity data; back gives location data.
+        </div>
+
+        <div id="upload-status"></div>
+
+        <div class="action-row">
+          <button class="btn btn-primary" id="btn-extract" onclick="runOCR()" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h6l3 9H6M21 3h-6l-3 9h6M6 21h12M12 12v9"/></svg>
+            Extract Data
+          </button>
+          <button class="btn btn-ghost" onclick="resetCapture()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            Reset
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress card -->
+      <div class="card" id="card-progress" style="display:none">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+          Running OCR — Please Wait
+        </h2>
+        <div class="progress-wrap">
+          <div class="progress-label" id="prog-label">Initialising…</div>
+          <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+          <div class="progress-sub" id="prog-sub">Starting OCR engine</div>
+        </div>
+      </div>
+
+      <!-- Form card -->
+      <div class="card" id="card-form" style="display:none">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+          Review &amp; Complete Details
+        </h2>
+
+        <div id="form-alert"></div>
+
+        <div class="form-section-label">Personal Details</div>
+        <div class="form-group">
+          <label for="f-surname">Surname</label>
+          <input type="text" id="f-surname" placeholder="Surname / Family name">
+        </div>
+        <div class="form-group">
+          <label for="f-given">Given Name(s)</label>
+          <input type="text" id="f-given" placeholder="First and middle names">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="f-sex">Sex</label>
+            <select id="f-sex">
+              <option value="">— Select —</option>
+              <option value="M">Male (M)</option>
+              <option value="F">Female (F)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="f-nationality">Nationality</label>
+            <input type="text" id="f-nationality" placeholder="UGA">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="f-dob">Date of Birth</label>
+            <input type="text" id="f-dob" placeholder="DD.MM.YYYY">
+          </div>
+          <div class="form-group">
+            <label for="f-expiry">Date of Expiry</label>
+            <input type="text" id="f-expiry" placeholder="DD.MM.YYYY">
+          </div>
+        </div>
+
+        <div class="form-section-label">ID Numbers</div>
+        <div class="form-group">
+          <label for="f-nin">NIN — National ID Number</label>
+          <input type="text" id="f-nin" class="mono" placeholder="e.g. CM0003510932UXF">
+        </div>
+        <div class="form-group">
+          <label for="f-cardno">Card Number</label>
+          <input type="text" id="f-cardno" class="mono" placeholder="e.g. 0119307246">
+        </div>
+
+        <div class="form-section-label">Location (from Back of ID)</div>
+        <div class="form-group">
+          <label for="f-village">Village</label>
+          <input type="text" id="f-village" placeholder="Village name">
+        </div>
+        <div class="form-group">
+          <label for="f-parish">Parish</label>
+          <input type="text" id="f-parish" placeholder="Parish name">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="f-subcounty">Sub County</label>
+            <input type="text" id="f-subcounty" placeholder="Sub County">
+          </div>
+          <div class="form-group">
+            <label for="f-county">County</label>
+            <input type="text" id="f-county" placeholder="County">
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="f-district">District</label>
+          <input type="text" id="f-district" placeholder="District">
+        </div>
+
+        <div class="form-section-label">Contact &amp; Collection Info</div>
+        <div class="form-group">
+          <label for="f-phone">Phone Number</label>
+          <input type="tel" id="f-phone" placeholder="07XX XXX XXX">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="f-officer">Collected By</label>
+            <input type="text" id="f-officer" placeholder="Staff name">
+          </div>
+          <div class="form-group">
+            <label for="f-date">Date Collected</label>
+            <input type="date" id="f-date">
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="f-notes">Notes / Flags</label>
+          <input type="text" id="f-notes" placeholder="Any issues or unclear fields">
+        </div>
+
+        <!-- Raw OCR output (collapsible) -->
+        <details class="raw-ocr-block" id="raw-block" style="display:none">
+          <summary>Show raw OCR text (for verification)</summary>
+          <pre id="raw-front-text"></pre>
+          <pre id="raw-back-text"></pre>
+        </details>
+
+        <div class="action-row">
+          <button class="btn btn-success" onclick="saveRecord()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+            Save Record
+          </button>
+          <button class="btn btn-ghost" onclick="resetCapture()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            Discard
+          </button>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ═══════════════════════════════════════ -->
+    <!--  TAB: RECORDS                          -->
+    <!-- ═══════════════════════════════════════ -->
+    <section id="tab-records" class="tab-content">
+
+      <div class="card">
+        <div class="records-toolbar">
+          <span class="records-count" id="records-count">0 records</span>
+          <div class="records-actions">
+            <button class="btn btn-primary btn-sm" onclick="exportExcel()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+              Export Excel
+            </button>
+            <button class="btn btn-danger btn-sm" onclick="clearAllRecords()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+              Clear All
+            </button>
+          </div>
+        </div>
+
+        <div id="records-container">
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6M9 16h6M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>
+            <p>No records yet.</p>
+            <small>Capture your first ID to get started.</small>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </div><!-- .app -->
+
+  <!-- SheetJS for Excel export -->
+  <script src="js/xlsx.full.min.js"></script>
+  <!-- Tesseract.js OCR engine -->
+  <script src="js/tesseract.min.js"></script>
+  <!-- App logic -->
+  <script src="js/app.js"></script>
+
+</body>
+</html>

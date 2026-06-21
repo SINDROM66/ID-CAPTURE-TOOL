@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.NssfIdCapture" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="colorPrimary">#0D4F82</item>
+        <item name="colorPrimaryVariant">#063A61</item>
+        <item name="colorSecondary">#1F8A5B</item>
+    </style>
+</resources>
