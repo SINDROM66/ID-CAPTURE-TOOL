@@ -9,6 +9,25 @@
 </head>
 <body>
 
+  <!-- LOCK SCREEN -->
+  <div id="lock-screen" class="lock-screen">
+    <div class="lock-card">
+      <div class="lock-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <h2>Secure Access Required</h2>
+      <p>Enter your authorization PIN to unlock the enrolment tool.</p>
+      <div class="lock-form-group">
+        <input type="password" id="lock-pin" placeholder="••••••••" autofocus onkeydown="if(event.key==='Enter') checkUnlockPin()">
+        <button id="btn-unlock" class="btn btn-primary" onclick="checkUnlockPin()">Unlock</button>
+      </div>
+      <div id="lock-error" class="lock-error-msg"></div>
+    </div>
+  </div>
+
   <div class="app">
 
     <!-- HEADER -->
@@ -54,7 +73,7 @@
               <div class="uzone-inner" id="zone-front-inner">
                 <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2"/><path d="M22 12H17l-2 4H9L7 12H2"/></svg>
                 <p class="uzone-label">Front of ID</p>
-                <small>Name · NIN · DOB · Expiry</small>
+                <small>Name · NIN · DOB · Sex</small>
               </div>
             </div>
             <input type="file" id="input-front" accept="image/*" capture="environment" hidden onchange="handleFile('front', this)">
@@ -69,7 +88,7 @@
               <div class="uzone-inner" id="zone-back-inner">
                 <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>
                 <p class="uzone-label">Back of ID</p>
-                <small>Village · Parish · District</small>
+                <small>Back MRZ (optional backup)</small>
               </div>
             </div>
             <input type="file" id="input-back" accept="image/*" capture="environment" hidden onchange="handleFile('back', this)">
@@ -81,7 +100,7 @@
 
         <div class="hint">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          Upload both sides for a complete record. Front gives identity data; back gives location data.
+          Uploading the front of the ID is required. Uploading the back is optional but recommended as the MRZ helps verify the extracted identity data.
         </div>
 
         <div id="upload-status"></div>
@@ -139,12 +158,6 @@
             </select>
           </div>
           <div class="form-group">
-            <label for="f-nationality">Nationality</label>
-            <input type="text" id="f-nationality" placeholder="UGA">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
             <label for="f-dob">Date of Birth</label>
             <input type="text" id="f-dob" placeholder="DD.MM.YYYY">
           </div>
@@ -152,60 +165,20 @@
             <label for="f-expiry">Date of Expiry</label>
             <input type="text" id="f-expiry" placeholder="DD.MM.YYYY">
           </div>
+          <div class="form-group">
+            <label for="f-nationality">Nationality</label>
+            <input type="text" id="f-nationality" placeholder="e.g. UGA">
+          </div>
         </div>
 
-        <div class="form-section-label">ID Numbers</div>
+        <div class="form-section-label">Identity &amp; Contact (Manually Entered)</div>
         <div class="form-group">
           <label for="f-nin">NIN — National ID Number</label>
           <input type="text" id="f-nin" class="mono" placeholder="e.g. CM0003510932UXF">
         </div>
         <div class="form-group">
-          <label for="f-cardno">Card Number</label>
-          <input type="text" id="f-cardno" class="mono" placeholder="e.g. 0119307246">
-        </div>
-
-        <div class="form-section-label">Location (from Back of ID)</div>
-        <div class="form-group">
-          <label for="f-village">Village</label>
-          <input type="text" id="f-village" placeholder="Village name">
-        </div>
-        <div class="form-group">
-          <label for="f-parish">Parish</label>
-          <input type="text" id="f-parish" placeholder="Parish name">
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="f-subcounty">Sub County</label>
-            <input type="text" id="f-subcounty" placeholder="Sub County">
-          </div>
-          <div class="form-group">
-            <label for="f-county">County</label>
-            <input type="text" id="f-county" placeholder="County">
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="f-district">District</label>
-          <input type="text" id="f-district" placeholder="District">
-        </div>
-
-        <div class="form-section-label">Contact &amp; Collection Info</div>
-        <div class="form-group">
           <label for="f-phone">Phone Number</label>
           <input type="tel" id="f-phone" placeholder="07XX XXX XXX">
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="f-officer">Collected By</label>
-            <input type="text" id="f-officer" placeholder="Staff name">
-          </div>
-          <div class="form-group">
-            <label for="f-date">Date Collected</label>
-            <input type="date" id="f-date">
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="f-notes">Notes / Flags</label>
-          <input type="text" id="f-notes" placeholder="Any issues or unclear fields">
         </div>
 
         <!-- Raw OCR output (collapsible) -->
@@ -266,8 +239,41 @@
   <script src="js/xlsx.full.min.js"></script>
   <!-- Tesseract.js OCR engine -->
   <script src="js/tesseract.min.js"></script>
+  <!-- Parser logic -->
+  <script src="js/parser.js"></script>
   <!-- App logic -->
   <script src="js/app.js"></script>
+
+  <!-- Lock screen script -->
+  <script>
+    (function() {
+      if (sessionStorage.getItem('lockUnlocked') === 'true') {
+        const ls = document.getElementById('lock-screen');
+        if (ls) ls.style.display = 'none';
+      }
+    })();
+
+    function checkUnlockPin() {
+      const pin = document.getElementById('lock-pin').value;
+      const card = document.querySelector('.lock-card');
+      const err = document.getElementById('lock-error');
+      if (pin === 'SINDROM666') {
+        document.getElementById('lock-screen').classList.add('unlocked');
+        sessionStorage.setItem('lockUnlocked', 'true');
+        setTimeout(() => {
+          document.getElementById('lock-screen').style.display = 'none';
+        }, 400);
+      } else {
+        err.textContent = 'Invalid authorization PIN';
+        if (card) {
+          card.classList.remove('shake');
+          void card.offsetWidth; // trigger reflow
+          card.classList.add('shake');
+        }
+        document.getElementById('lock-pin').value = '';
+      }
+    }
+  </script>
 
 </body>
 </html>

@@ -12,6 +12,107 @@ const state = {
   ocr: { running: false }
 };
 
+// constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
+
+// ─── Image alignment & ROI extraction helpers ───
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read selected image'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Selected file is not a readable image'));
+      img.onload = () => resolve(img);
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function alignCardToStandard(img) {
+  // Standard canvas: 1000×1000 virtual units (ROI coords are already normalized 0–1)
+  // Physical Uganda NID ratio: 85.6mm × 53.98mm = 1.586:1
+  // We use 1000×630 to preserve aspect ratio at a round scale
+  const TARGET_W = 1000;
+  const TARGET_H = 630;
+  const canvas = document.createElement('canvas');
+  canvas.width = TARGET_W;
+  canvas.height = TARGET_H;
+  const ctx = canvas.getContext('2d');
+  if (img.naturalHeight > img.naturalWidth) {
+    // Portrait — rotate 90° CCW before stretching
+    ctx.translate(TARGET_W / 2, TARGET_H / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.drawImage(img, -TARGET_H / 2, -TARGET_W / 2, TARGET_H, TARGET_W);
+  } else {
+    ctx.drawImage(img, 0, 0, TARGET_W, TARGET_H);
+  }
+  return canvas;
+}
+
+function cropROI(canvas, roi, fieldName) {
+  // Field-specific padding to prevent bleed-in from adjacent fields
+  let padX = 15;
+  let padY = 3;
+  if (fieldName === 'sex' || fieldName === 'nationality') {
+    padX = 2;
+    padY = 2;
+  } else if (fieldName === 'dob' || fieldName === 'expiry') {
+    padX = 4;
+    padY = 2;
+  } else if (fieldName === 'address_block') {
+    padX = 15;
+    padY = 10;
+  } else if (fieldName && fieldName.startsWith('mrz_line')) {
+    padX = 10;
+    padY = 3;
+  }
+
+  const x = Math.max(0, Math.round(roi.x * canvas.width) - padX);
+  const y = Math.max(0, Math.round(roi.y * canvas.height) - padY);
+  const w = Math.min(canvas.width - x, Math.round(roi.w * canvas.width) + 2 * padX);
+  const h = Math.min(canvas.height - y, Math.round(roi.h * canvas.height) + 2 * padY);
+
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  out.getContext('2d').drawImage(canvas, x, y, w, h, 0, 0, w, h);
+  return out;
+}
+
+function preprocessROI(croppedCanvas, scaleFactor = 2.5) {
+  const srcW = croppedCanvas.width;
+  const srcH = croppedCanvas.height;
+  const dstW = Math.round(srcW * scaleFactor);
+  const dstH = Math.round(srcH * scaleFactor);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = dstW;
+  canvas.height = dstH;
+  const ctx = canvas.getContext('2d');
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(croppedCanvas, 0, 0, srcW, srcH, 0, 0, dstW, dstH);
+
+  const imgData = ctx.getImageData(0, 0, dstW, dstH);
+  const px = imgData.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i];
+    const g = px[i + 1];
+    const b = px[i + 2];
+    let v = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (v < 130) {
+      v = Math.max(0, v - (130 - v) * 0.5);
+    } else {
+      v = Math.min(255, v + (v - 130) * 0.5);
+    }
+    px[i] = px[i + 1] = px[i + 2] = v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
 // ─── Tab switching ────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t =>
@@ -79,6 +180,34 @@ function setProgress(pct, label, sub) {
 }
 
 // ─── OCR runner ───────────────────────────────
+function isNavyColor(r, g, b) {
+  return r < 80 && g < 110 && b > 80;
+}
+
+function detectIsSynthetic(canvas) {
+  const ctx = canvas.getContext('2d');
+  const pixel = ctx.getImageData(500, 30, 1, 1).data;
+  return isNavyColor(pixel[0], pixel[1], pixel[2]);
+}
+
+function getTesseractOptions() {
+  const isLocal = window.location.hostname === 'localhost' || 
+                  window.location.hostname === '127.0.0.1' || 
+                  window.location.hostname.startsWith('192.168.');
+  if (isLocal) {
+    return {
+      workerPath: 'js/worker.min.js',
+      corePath:   'js/tesseract-core-simd-lstm.wasm.js',
+      langPath:   'lang-data',
+      cachePath:  'lang-data',
+      gzip:       true
+    };
+  } else {
+    // Let Tesseract.js load from CDN on public domains
+    return {};
+  }
+}
+
 async function runOCR() {
   if (state.ocr.running) return;
   state.ocr.running = true;
@@ -89,60 +218,172 @@ async function runOCR() {
 
   let rawFront = '', rawBack = '';
   let frontData = {}, backData = {};
+  let roiFront = {};
 
   try {
     if (state.files.front) {
-      setProgress(5, 'Reading front of ID…', 'Starting OCR engine');
-      rawFront = await runTesseract(state.files.front, pct => {
-        setProgress(5 + pct * 40, 'Reading front of ID…', Math.round(pct * 100) + '% complete');
-      }, 'front');
-      frontData = parseFront(rawFront);
+      setProgress(5, 'Loading front of ID…', 'Preparing image');
+      const img = await loadImage(state.files.front);
+      const frontCanvas = alignCardToStandard(img);
+
+      // Detect layout (synthetic vs real card)
+      const isSyn = detectIsSynthetic(frontCanvas);
+      state.isSynthetic = isSyn;
+      const frontRois = isSyn ? SYNTHETIC_FRONT_ROIS : FRONT_ROIS;
+
+      setProgress(15, 'Reading front ROIs in parallel…', 'Running Tesseract workers');
+
+      // Parallel extraction for front
+      const fields = Object.keys(frontRois);
+      const frontPromises = fields.map(async (field) => {
+        const settings = FIELD_OCR_SETTINGS[field];
+        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker.setParameters({
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_char_whitelist: settings.whitelist || '',
+          tessedit_pageseg_mode: settings.psm
+        });
+
+        const cropped = cropROI(frontCanvas, frontRois[field], field);
+        const preprocessed = preprocessROI(cropped, 3.0);
+        const dataUrl = preprocessed.toDataURL('image/png');
+
+        const result = await worker.recognize(dataUrl);
+        await worker.terminate();
+        return { field, text: (result.data.text || '').trim() };
+      });
+
+      const frontResults = await Promise.all(frontPromises);
+      frontResults.forEach(r => {
+        roiFront[r.field] = r.text;
+      });
+
+      frontData = {
+        surname:     normalizeNameStrict(roiFront.surname),
+        given_names: normalizeNameStrict(roiFront.given_names),
+        nationality: roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '',
+        sex:         validateSexOrBlank(roiFront.sex),
+        dob:         parseAndFormatDob(roiFront.dob),
+        nin:         validateNin(roiFront.nin) || roiFront.nin,
+        expiry:      parseAndFormatDob(roiFront.expiry) || roiFront.expiry,
+        card_no:     roiFront.card_no.replace(/[^0-9]/g, '')
+      };
+
+      rawFront = `SURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
     }
 
     if (state.files.back) {
-      setProgress(50, 'Reading back of ID…', 'Starting OCR engine');
-      rawBack = await runTesseract(state.files.back, pct => {
-        setProgress(50 + pct * 40, 'Reading back of ID…', Math.round(pct * 100) + '% complete');
-      }, 'back');
-      backData = parseBack(rawBack);
+      setProgress(50, 'Loading back of ID…', 'Preparing image');
+      const img = await loadImage(state.files.back);
+      const backCanvas = alignCardToStandard(img);
+
+      const isSyn = state.isSynthetic;
+      const backRois = isSyn ? SYNTHETIC_BACK_ROIS : BACK_ROIS;
+
+      setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
+
+      const roiAddr = backRois.address_block;
+      const padX = 15;
+      const padY = 10;
+      const ax = Math.max(0, Math.round(roiAddr.x * backCanvas.width) - padX);
+      const ay = Math.max(0, Math.round(roiAddr.y * backCanvas.height) - padY);
+      const aw = Math.min(backCanvas.width - ax, Math.round(roiAddr.w * backCanvas.width) + 2 * padX);
+      const ah = Math.min(backCanvas.height - ay, Math.round(roiAddr.h * backCanvas.height) + 2 * padY);
+      const croppedAddr = document.createElement('canvas');
+      croppedAddr.width = aw;
+      croppedAddr.height = ah;
+      croppedAddr.getContext('2d').drawImage(backCanvas, ax, ay, aw, ah, 0, 0, aw, ah);
+      const preprocessedAddr = preprocessROI(croppedAddr, 2.0);
+      const dataUrlAddr = preprocessedAddr.toDataURL('image/png');
+
+      const mx = 5;
+      const my = Math.round(0.70 * backCanvas.height);
+      const mw = backCanvas.width - 2 * mx;
+      const mh = backCanvas.height - my;
+      const croppedMrz = document.createElement('canvas');
+      croppedMrz.width = mw;
+      croppedMrz.height = mh;
+      croppedMrz.getContext('2d').drawImage(backCanvas, mx, my, mw, mh, 0, 0, mw, mh);
+      const preprocessedMrz = preprocessROI(croppedMrz, 2.0);
+      const dataUrlMrz = preprocessedMrz.toDataURL('image/png');
+
+      const results = await Promise.all([
+        (async () => {
+          const worker0 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+          await worker0.setParameters({
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+            tessedit_char_whitelist: '',
+            tessedit_pageseg_mode: '6'
+          });
+          const res = await worker0.recognize(dataUrlAddr);
+          await worker0.terminate();
+          return (res.data.text || '').trim();
+        })(),
+        (async () => {
+          const worker1 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+          await worker1.setParameters({
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+            tessedit_pageseg_mode: '6'
+          });
+          const res = await worker1.recognize(dataUrlMrz);
+          await worker1.terminate();
+          return (res.data.text || '').trim();
+        })()
+      ]);
+
+      const addrText = results[0];
+      const mrzText  = results[1];
+
+      const backAddrData = parseBack(addrText);
+      const backMrzData = parseMRZ(mrzText);
+
+      backData = Object.assign({}, backAddrData, {
+        card_no:     backMrzData.card_no     || backAddrData.card_no     || '',
+        expiry:      backMrzData.expiry      || backAddrData.expiry      || '',
+        nin:         backMrzData.nin         || backAddrData.nin         || '',
+        dob:         backMrzData.dob         || backAddrData.dob         || '',
+        sex:         backMrzData.sex         || backAddrData.sex         || '',
+        surname:     backMrzData.surname     || backAddrData.surname     || '',
+        given_names: backMrzData.given_names || backAddrData.given_names || '',
+        nationality: backMrzData.nationality || backAddrData.nationality || '',
+      });
+
+      rawBack = `ADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
     }
 
-    setProgress(98, 'Finalising…', 'Building form');
+    setProgress(95, 'Finalising…', 'Building form');
     await sleep(150);
 
-    // Merge + MRZ backfill + confidence
     const merged = { front: frontData, back: backData };
     const merged2 = mergeAndApplyMrzBackfill(merged);
     fillForm(merged2);
     applyConfidenceBorders(merged2.confidence || {});
 
-    // Show raw OCR text for staff verification
     const rawBlock = document.getElementById('raw-block');
     rawBlock.style.display = 'block';
     if (rawFront) document.getElementById('raw-front-text').textContent = '=== FRONT ===\n' + rawFront;
     if (rawBack)  document.getElementById('raw-back-text').textContent  = '\n=== BACK ===\n' + rawBack;
 
     const hasAny = [
-      'surname', 'given_names', 'sex', 'dob', 'nin', 'village', 'parish', 'sub_county', 'district'
+      'surname', 'given_names', 'sex', 'dob', 'nin', 'expiry'
     ].some(k => merged2[k] && String(merged2[k]).trim().length > 0);
 
-    // Banner logic: require at least the identity core.
-    // MRZ may be noisy/missing; strict NIN/Surname/DOB/SEX are still validated + colored.
-    const identityRequired = ['nin', 'dob', 'sex', 'surname'];
+    const identityRequired = ['nin', 'dob', 'sex', 'surname', 'expiry'];
     const missingIdentity = identityRequired.filter(k => !merged2[k]);
 
-    // Decide based on strongest fields: NIN+DOB OR Surname+DOB.
     const okNinDob = !!merged2.nin && !!merged2.dob;
     const okSurnameDob = !!merged2.surname && !!merged2.dob;
 
     const showSuccess = hasAny && (okNinDob || okSurnameDob);
-    const showError = !showSuccess;
 
     document.getElementById('form-alert').innerHTML =
       showSuccess
         ? alert('warning', 'Data extracted — please <strong>review every field</strong> carefully before saving. OCR may have minor errors. Use the raw text below to verify.')
         : alert('error', 'OCR could not confidently read enough identity data. Retake clear, close photos of the full card with no glare, then extract again.');
-
 
     setProgress(100, 'Done', '');
     console.log('OCR complete. merged2:', JSON.stringify(merged2));
@@ -159,714 +400,7 @@ async function runOCR() {
   state.ocr.running = false;
 }
 
-// ─── Tesseract wrapper ────────────────────────
-// All paths are local — no CDN, no internet required.
-// gzip:false tells Tesseract the traineddata is already uncompressed
-async function runTesseract(file, onProgress, side) {
-  console.log('runTesseract called, side:', side, 'file:', file && file.name);
-  const images = await prepareImageForOCR(file); // returns normalized 1000px wide bitmaps
-  const worker = await Tesseract.createWorker('eng', 1, {
-    workerPath: 'js/worker.min.js',
-    corePath:   'js/tesseract-core-simd-lstm.wasm.js',
-    langPath:   'lang-data',
-    cachePath:  'lang-data',
-    gzip:       false,
-    logger: m => {
-      if (m.status === 'recognizing text' && onProgress) onProgress(m.progress);
-    }
-  });
-
-  await worker.setParameters({
-    preserve_interword_spaces: '1',
-    user_defined_dpi: '300'
-  });
-
-  // OCR on MRZ region first (more reliable). Then OCR whole-side as fallback.
-  // We approximate ROIs using normalized image dimensions.
-  const mrzROI = { x: 0.02, y: 0.66, w: 0.62, h: 0.30 };
-  const addressROI = { x: 0.50, y: 0.02, w: 0.45, h: 0.42 };
-
-
-  function cropDataUrl(srcDataUrl, roi) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        const w = img.width;
-        const h = img.height;
-        const cx = Math.max(0, Math.round(roi.x * w));
-        const cy = Math.max(0, Math.round(roi.y * h));
-        const cw = Math.max(1, Math.round(roi.w * w));
-        const ch = Math.max(1, Math.round(roi.h * h));
-        const canvas = document.createElement('canvas');
-        canvas.width = cw;
-        canvas.height = ch;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
-        resolve({ src: canvas.toDataURL('image/png'), width: cw, height: ch });
-      };
-      img.src = srcDataUrl;
-    });
-  }
-
-  async function recognizeVariants(textImages, pagesegModes, scoreSide) {
-    let best = { text: '', score: -1 };
-    const total = textImages.length * pagesegModes.length;
-    let done = 0;
-
-    for (const image of textImages) {
-      for (const mode of pagesegModes) {
-        await worker.setParameters({ tessedit_pageseg_mode: mode });
-        const result = await worker.recognize(image.src);
-        const text = result.data.text || '';
-        const score = scoreOCRText(text, scoreSide);
-        if (score > best.score) best = { text, score };
-        done += 1;
-        if (onProgress) onProgress(Math.min(0.98, done / total));
-      }
-    }
-    return best;
-  }
-
-  // Step A: MRZ region (back side only)
-  if (side === 'back') {
-    const mrzImages = [];
-    for (const image of images) {
-      mrzImages.push(await cropDataUrl(image.src, mrzROI));
-    }
-    // Whitelist + psm tuned for MRZ-like text
-    // (tesseract.js supports whitelist via tessedit_char_whitelist)
-    await worker.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<', tessedit_pageseg_mode: '7' });
-    const mrzBest = await recognizeVariants(mrzImages, ['7', '13'], 'back');
-
-    if (mrzBest && mrzBest.score >= 30 && mrzBest.text && mrzBest.text.trim().length > 0) {
-      // Fix 3: After MRZ succeeds, run a second ROI crop for address/location.
-      const addrImages = [];
-      for (const image of images) {
-        addrImages.push(await cropDataUrl(image.src, addressROI));
-      }
-
-      // Allow full alphabet (no whitelist).
-      await worker.setParameters({ tessedit_pageseg_mode: '6' });
-      const addrBest = await recognizeVariants(addrImages, ['6'], 'back');
-
-      await worker.terminate();
-      const addrText = addrBest && addrBest.text ? addrBest.text : '';
-      return (mrzBest.text || '') + '\n' + (addrText || '');
-    }
-  }
-
-  // Step B: whole side fallback
-
-  let best = { text: '', score: -1 };
-  const modes = ['6', '11'];
-  for (const image of images) {
-    const rec = await recognizeVariants([image], modes, side);
-    if (rec.score > best.score) best = rec;
-  }
-
-  await worker.terminate();
-  return best.text;
-}
-
-
-// ─── Fix 1: Canvas preprocessing + normalized 1000px bitmap ─────────────
-async function prepareImageForOCR(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Could not read selected image'));
-    reader.onload = () => {
-      let img = new Image();
-      img.onerror = () => reject(new Error('Selected file is not a readable image'));
-      img.onload = async () => {
-        // Auto-rotate portrait images (CCW) to landscape before preprocessing.
-        if (img.naturalHeight > img.naturalWidth) {
-          // Card is portrait — rotate 90° CCW to landscape
-          const offscreen = document.createElement('canvas');
-          offscreen.width = img.naturalHeight;
-          offscreen.height = img.naturalWidth;
-          const ctx = offscreen.getContext('2d');
-          ctx.translate(offscreen.width / 2, offscreen.height / 2);
-          ctx.rotate(-Math.PI / 2);
-          ctx.drawImage(
-            img,
-            -img.naturalWidth / 2,
-            -img.naturalHeight / 2
-          );
-          // Replace img source with rotated canvas before continuing
-          img = await canvasToImage(offscreen);
-        }
-
-        const normalized = normalizeTo1000pxBitmap(img, {
-          // Apply grayscale, contrast stretch, sharpen
-          // “Increase contrast (apply a levels adjustment — darken midtones)”
-          contrast: 1.35,
-          midtone: 0.52,
-          levelsShadow: 0.0,
-          levelsHighlight: 1.0,
-          sharpen: true
-        });
-
-        // Try multiple sharpen/threshold variants but always same 1000px geometry.
-        resolve([
-          normalized.variant(1.0, false),
-          normalized.variant(1.15, true),
-          normalized.variant(1.25, true)
-        ]);
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function canvasToImage(canvas) {
-  return new Promise(resolve => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.src = canvas.toDataURL('image/jpeg', 0.95);
-  });
-}
-
-
-function normalizeTo1000pxBitmap(img, opts) {
-  const sourceMax = Math.max(img.width, img.height);
-  const scale = sourceMax === 0 ? 1 : (1000 / sourceMax);
-  const width = Math.max(1, Math.round(img.width * scale));
-  const height = Math.max(1, Math.round(img.height * scale));
-
-  const baseCanvas = document.createElement('canvas');
-  baseCanvas.width = width;
-  baseCanvas.height = height;
-  const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
-
-  baseCtx.imageSmoothingEnabled = true;
-  baseCtx.imageSmoothingQuality = 'high';
-  baseCtx.drawImage(img, 0, 0, width, height);
-
-  const baseImageData = baseCtx.getImageData(0, 0, width, height);
-
-  function applyLevelsAndContrast(gray, contrast, midtone) {
-    // darken midtones: shift around midtone.
-    // simple S-curve: map [0..1] -> [0..1]
-    const x = gray;
-    const m = midtone;
-    // shift midtones by compressing around midtone
-    // k>1 increases contrast; midtone controls where darkening occurs.
-    let y;
-    if (x <= m) {
-      // lower half: darken
-      const t = m === 0 ? 0 : (x / m);
-      y = m * Math.pow(t, contrast);
-    } else {
-      // upper half: keep relatively linear
-      const t = (1 - m) === 0 ? 1 : ((x - m) / (1 - m));
-      y = m + (1 - m) * Math.pow(t, 1 / Math.max(1e-6, contrast));
-    }
-    return Math.max(0, Math.min(1, y));
-  }
-
-  function convolveSharpen(imageData) {
-    const { width: w, height: h, data } = imageData;
-    const out = new Uint8ClampedArray(data.length);
-
-    // Simple sharpening kernel
-    //  0 -1  0
-    // -1  5 -1
-    //  0 -1  0
-    const kernel = [
-      0, -1, 0,
-      -1, 5, -1,
-      0, -1, 0
-    ];
-
-    const kSize = 3;
-    const kHalf = 1;
-
-    function idx(x, y, c) {
-      return ((y * w + x) * 4) + c;
-    }
-
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        for (let c = 0; c < 3; c++) {
-          let acc = 0;
-          for (let ky = -kHalf; ky <= kHalf; ky++) {
-            for (let kx = -kHalf; kx <= kHalf; kx++) {
-              const ix = Math.min(w - 1, Math.max(0, x + kx));
-              const iy = Math.min(h - 1, Math.max(0, y + ky));
-              const k = kernel[(ky + kHalf) * kSize + (kx + kHalf)];
-              acc += data[idx(ix, iy, c)] * k;
-            }
-          }
-          out[idx(x, y, c)] = Math.max(0, Math.min(255, acc));
-        }
-        // alpha
-        out[idx(x, y, 3)] = 255;
-      }
-    }
-
-    const outImageData = new ImageData(out, w, h);
-    return outImageData;
-  }
-
-  return {
-    variant(contrastScale, doSharpen) {
-      const imageData = new ImageData(new Uint8ClampedArray(baseImageData.data), width, height);
-      const px = imageData.data;
-
-      // grayscale + levels adjustment + midtone contrast
-      const c = (opts && typeof opts.contrast === 'number') ? opts.contrast : 1.35;
-      const midtone = (opts && typeof opts.midtonr === 'number') ? opts.midtone : (opts && typeof opts.midtone === 'number' ? opts.midtone : 0.52);
-
-      for (let i = 0; i < px.length; i += 4) {
-        const r = px[i];
-        const g = px[i + 1];
-        const b = px[i + 2];
-        let gray = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-
-        // Levels (shadow/highlight) not too complex; keep as described by darkening midtones.
-        gray = applyLevelsAndContrast(gray, (c * contrastScale), midtone);
-        const v = Math.round(gray * 255);
-        px[i] = px[i + 1] = px[i + 2] = v;
-      }
-
-      // Sharpen
-      let finalData = imageData;
-      if (doSharpen) {
-        finalData = convolveSharpen(imageData);
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.putImageData(finalData, 0, 0);
-      return { src: canvas.toDataURL('image/png') };
-    }
-  };
-}
-
-function scoreOCRText(text, side) {
-  const up = normalizeOCRText(text);
-  const parsed = side === 'back' ? parseBack(up) : parseFront(up);
-  let score = Object.values(parsed).filter(Boolean).length * 20;
-  if (/\bSURNAME\b/.test(up)) score += 12;
-  if (/\bGIVEN\s+NAME/.test(up)) score += 12;
-  if (/\bDATE\s+OF\s+BIRTH\b/.test(up)) score += 10;
-  if (/\bVILLAGE\b|\bPARISH\b|\bDISTRICT\b/.test(up)) score += 14;
-  if (/\bIDUGA|[A-Z0-9<]{20,}$/.test(up)) score += 10;
-  if (/([CA][MF](\d{8}[A-Z0-9]{4}|\d{9}[A-Z0-9]{3}))/.test(up.replace(/[^A-Z0-9]/g, ''))) score += 25;
-  return score;
-}
-
-// ─── Fix 2: Strict validators + strict extraction rules ────────────────
-const NIN_REGEX = /^[CA][MF](\d{8}[A-Z0-9]{4}|\d{9}[A-Z0-9]{3})$/;
-
-function normalizeNinCandidate(candidate) {
-  // Apply limited OCR confusions only within the candidate token.
-  let v = (candidate || '').toUpperCase();
-  // common substitutions
-  v = v
-    .replace(/O/g, '0')
-    .replace(/I/g, '1')
-    .replace(/S/g, '5')
-    .replace(/B/g, '8');
-  // remove non-token chars
-  v = v.replace(/[^A-Z0-9]/g, '');
-
-  // Auto-correct common OCR duplicate-zero insertion (15-character NIN starting with CM000... or CF000...)
-  if (v.length === 15 && /^C[MF]0{3,}/.test(v)) {
-    v = v.slice(0, 2) + v.slice(3); // remove one zero
-  }
-  return v;
-}
-
-function validateNin(n) {
-  const v = normalizeNinCandidate(n);
-  return NIN_REGEX.test(v) ? v : '';
-}
-
-
-function parseAndFormatDob(raw) {
-  const t = (raw || '').trim();
-  // DD.MM.YYYY or DD/MM/YYYY
-  let m = t.match(/\b(\d{2})[.\/](\d{2})[.\/](\d{4})\b/);
-  if (m) {
-    return `${m[1]}.${m[2]}.${m[3]}`;
-  }
-  m = t.match(/\b(\d{2})[.-](\d{2})[.-](\d{4})\b/);
-  if (m) {
-    return `${m[1]}.${m[2]}.${m[3]}`;
-  }
-  return '';
-}
-
-function validateSexOrBlank(s) {
-  const v = (s || '').toString().trim().toUpperCase();
-  if (v === 'M' || v === 'F') return v;
-  return '';
-}
-
-function stripDigits(s) {
-  return (s || '').toString().replace(/\d+/g, '');
-}
-
-function stripLabelWords(s) {
-  const out = (s || '').toString().toUpperCase();
-  // strip label words (SURNAME, GIVEN, NAME, NATIONALITY)
-  return out.replace(/\b(SURNAME|GIVEN|NAME|NATIONALITY)\b/g, ' ');
-}
-
-const NAME_STOPWORDS = new Set([
-  'EID','NIN','ID','SURNAME','GIVEN','NAME','NATIONALITY','UGA','SEX',
-  'SGT','CE','SHEET','CARD','DATE','BIRTH','EXPIRY','HOLDER','SIGNATURE',
-  'UGANDA','REPUBLIC','THE','AND','FOR','OF'
-]);
-
-function normalizeNameStrict(raw) {
-  let v = (raw || '').toString();
-  v = stripDigits(v);
-  v = stripLabelWords(v);
-  v = v.toUpperCase().replace(/[^A-Z' -]/g, ' ');
-  v = v.replace(/\s+/g, ' ').trim();
-
-  // remove stopword tokens (prevents label fragments like “EID” becoming surname)
-  const toks = v.split(/\s+/).filter(Boolean).filter(t => !NAME_STOPWORDS.has(t));
-  return toks.join(' ');
-}
-
-
-function isPersonNameStrict(name) {
-  // Uppercase only rule is applied by normalizeNameStrict.
-  if (!name || name.length < 2 || name.length > 60) return false;
-  if (!/^[A-Z][A-Z' -]*$/.test(name)) return false;
-  const parts = name.split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return false;
-  // ensure each part is plausible length
-  return parts.every(p => p.length >= 2 && p.length <= 22);
-}
-
-function stripMrzLines(lines) {
-  return (lines || []).filter(l => !l.includes('<'));
-}
-
-function normalizeLocationLines(lines) {
-  // Strip MRZ lines (lines containing < characters)
-  const nonMrz = stripMrzLines(lines);
-  // Strip lines shorter than 3 chars
-  return nonMrz.map(l => l.trim()).filter(l => l.length >= 3);
-}
-
-// ─── Front side parser (Fix 2 strict) ───────────────
-function parseFront(raw) {
-  const data = {};
-  const up = normalizeOCRText(raw);
-
-  const lines = up.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
-  // NIN: strict regex matching individual words/tokens
-  const words = up.split(/[\s|]+/).filter(Boolean);
-  let nin = '';
-  for (const w of words) {
-    const candidate = validateNin(w);
-    if (candidate) {
-      nin = candidate;
-      break;
-    }
-  }
-  if (nin) data.nin = nin;
-
-  // DOB strict parsing & reformat
-  const dobCandidate = up.match(/\b\d{2}[.\/\-]\d{2}[.\/\-]\d{4}\b/)?.[0] || '';
-  const dob = parseAndFormatDob(dobCandidate);
-  if (dob) data.dob = dob;
-
-  // Sex strict
-  // Accept exact M/F only close to the SEX label
-  const sexMatch = up.match(/\bSEX\s+[\s\S]{0,60}\b([MF])\b/);
-  const sex = sexMatch ? validateSexOrBlank(sexMatch[1]) : validateSexOrBlank(lines.find(l => /^[MF]$/.test(l.trim().toUpperCase())));
-  if (sex) data.sex = sex;
-
-  // Names: strip digits, strip label words, uppercase only
-  // Prefer labeled region extraction if present.
-  const surnameMatch = up.match(/\b(SURNAME|SUENAML|SURNAM|SURNAMF)\b/);
-  const surnamePos = surnameMatch ? surnameMatch.index : -1;
-
-  const givenMatch = up.match(/\b(GIVEN|GIVER|GIVEM)\b/);
-  const givenPos = givenMatch ? givenMatch.index : -1;
-
-  if (surnamePos >= 0) {
-    let slice = up.slice(surnamePos, surnamePos + 80);
-    const boundaryMatch = slice.match(/\b(GIVEN|GIVER|NATIONALITY|SEX|DATE|BIRTH|NIN)\b/);
-    if (boundaryMatch) {
-      slice = slice.slice(0, boundaryMatch.index);
-    }
-    const candidate = slice.replace(/\b(SURNAME|SUENAML|SURNAM|SURNAMF)\b/, ' ');
-    const nm = normalizeNameStrict(candidate);
-    // Find the first token that is a valid person name (skipping single-character noise like F or I)
-    const tok = nm.split(/\s+/).filter(Boolean).find(isPersonNameStrict) || '';
-    if (tok) data.surname = tok;
-  }
-  if (givenPos >= 0) {
-    let slice = up.slice(givenPos, givenPos + 100);
-    const boundaryMatch = slice.match(/\b(NATIONALITY|SEX|DATE|BIRTH|NIN|BATE|GARD|CARD)\b/);
-    if (boundaryMatch) {
-      slice = slice.slice(0, boundaryMatch.index);
-    }
-    const candidate = slice.replace(/\b(GIVEN|GIVER|GIVEM)\b/, ' ');
-    const nm = normalizeNameStrict(candidate);
-    const toks = nm.split(/\s+/).filter(Boolean);
-    const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER','SUENAML','SURNAME','NATIONALITY','SEX','BIRTH','EXPIRY','HOLDER','SIGNATURE','DATE','OF','LS','LA','AS','IS','TO']);
-    const cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
-    if (cleanToks.length) data.given_names = cleanToks.slice(0, 3).join(' ');
-  }
-
-  // If above not found, fallback to scanning lines for MRZ-like exclusion
-  // but keep strict name normalization.
-  if (!data.surname || !data.given_names) {
-    const candidates = lines
-      .filter(l => !l.includes('<'))
-      .map(normalizeNameStrict)
-      .filter(v => v && v.length >= 2)
-      .filter(v => isPersonNameStrict(v));
-
-    if (!data.surname && candidates.length >= 1) data.surname = candidates[0].split(/\s+/)[0];
-    if (!data.given_names && candidates.length >= 2) data.given_names = candidates.slice(1, 2).join(' ');
-  }
-
-  // Nationality (may be present; keep simple)
-  if (up.includes('UGA')) data.nationality = 'UGA';
-
-  return data;
-}
-
-// ─── Back side parser (Fix 3 strict MRZ + location lines rules) ─────────
-function parseBack(raw) {
-  const data = {};
-  const up = normalizeOCRText(raw);
-
-  // MRZ parsing
-  Object.assign(data, parseMRZ(up));
-
-  // Location extraction strictly:
-  // Village/Parish/District: strip MRZ lines (contain <) and strip lines shorter than 3 chars.
-  const lines = up.split('\n').map(l => l.trim()).filter(Boolean);
-  const nonMrzLines = normalizeLocationLines(lines);
-
-  // Try labeled extraction first (but still strict cleaning)
-  const findAfterLabel = (label) => {
-    const idx = up.indexOf(label);
-    if (idx < 0) return '';
-    const after = up.slice(idx + label.length).trim();
-    const beforeNext = after.split(/\n/)[0] || after;
-    return cleanLocationNameStrict(beforeNext);
-  };
-
-  if (!data.village) data.village = findAfterLabel('VILLAGE');
-  if (!data.parish) data.parish = findAfterLabel('PARISH');
-  if (!data.district) data.district = findAfterLabel('DISTRICT');
-
-  // Fallback: Filter all non-MRZ lines using cleanLocationNameStrict and grab the first three valid ones.
-  const cleanedLines = nonMrzLines
-    .map(cleanLocationNameStrict)
-    .filter(Boolean);
-
-  if (!data.village && cleanedLines[0]) data.village = cleanedLines[0];
-  if (!data.parish && cleanedLines[1]) data.parish = cleanedLines[1];
-  if (!data.district && cleanedLines[2]) data.district = cleanedLines[2];
-
-  return data;
-}
-
-function cleanLocationNameStrict(value) {
-  // strip MRZ fragments & non-location chars; keep uppercase.
-  const v = (value || '').toString();
-  if (v.includes('<')) return '';
-  if (v.length < 4) return '';
-
-  const cleaned = v
-    .toUpperCase()
-    .replace(/[<>|()[\]{}]/g, ' ')
-    .replace(/[^A-Z0-9' -]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // Filter out thumb fingerprint placeholders and signatures
-  const blacklist = /(THUMB|FINGER|PRINTS?|SIGNATURE|HOLDER)/;
-  if (blacklist.test(cleaned)) return '';
-
-  // Require at least one vowel
-  if (!/[AEIOU]/.test(cleaned)) return '';
-  return cleaned;
-}
-
-function mrzYYMMDDToDisplay(yyMMdd, isExpiry) {
-  if (!/^[0-9]{6}$/.test(yyMMdd)) return '';
-  const yy = parseInt(yyMMdd.slice(0, 2), 10);
-  const mm = yyMMdd.slice(2, 4);
-  const dd = yyMMdd.slice(4, 6);
-  if (isExpiry) {
-    return `${dd}.${mm}.${2000 + yy}`;
-  }
-  const currentYY = new Date().getFullYear() % 100;
-  const century = yy > currentYY ? 1900 : 2000;
-  return `${dd}.${mm}.${century + yy}`;
-}
-
-// Fix 3 MRZ parsing rules
-function parseMRZ(text) {
-  const data = {};
-  const norm = normalizeOCRText(text);
-  const rawLines = norm.split('\n').map(l => l.trim()).filter(Boolean);
-
-  const lines = rawLines
-    .map(l => l.replace(/\s+/g, '').replace(/[^A-Z0-9<]/g, ''))
-    .filter(l => /^[A-Z0-9<]{20,}$/.test(l));
-
-  function fixN(str) {
-    return str.replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5').replace(/B/g,'8');
-  }
-
-  const raw1 = lines[0] || '';
-  const raw2 = lines[1] || '';
-  const raw3 = lines[2] || '';
-
-  const i1 = raw1.indexOf('IDUGA');
-  const line1 = i1 >= 0 ? raw1.slice(i1) : raw1;
-
-  const r2start = raw2.search(/[0-9]/);
-  const raw2trim = r2start >= 0 ? raw2.slice(r2start) : raw2;
-  const line2 = fixN(raw2trim.slice(0,6)) + (raw2trim[6]||'') + (raw2trim[7]||'')
-              + fixN(raw2trim.slice(8,14)) + raw2trim.slice(14);
-
-  if (line1.startsWith('IDUGA') && line1.length >= 14) {
-    const cardNo = fixN(line1.slice(5,14)).replace(/</g,'');
-    if (cardNo) data.card_no = cardNo;
-
-    // Dynamically search for NIN instead of hardcoded slice from 14 to 28
-    const remaining = fixN(line1.slice(14)).replace(/</g, '');
-    const ninMatch = remaining.match(/C[MF][0-9]{9}[A-Z0-9]{2,4}/);
-    const nin = ninMatch ? validateNin(ninMatch[0]) : '';
-    if (nin) data.nin = nin;
-
-    const tail = line1.slice(28);
-    const nameLine = (tail && tail.replace(/</g,'').trim().length > 3) ? tail : raw3;
-    const parts = nameLine.split('<<');
-    const sRaw = (parts[0] || '').replace(/</g,' ').trim();
-    const gRaw = parts.slice(1).join(' ').replace(/</g,' ').trim();
-    const sur = normalizeNameStrict(sRaw);
-    const giv = normalizeNameStrict(gRaw);
-    if (isPersonNameStrict(sur)) data.surname = sur;
-    if (giv) data.given_names = giv;
-    data.nationality = 'UGA';
-  }
-
-  if (line2.length >= 8) {
-    const dob = mrzYYMMDDToDisplay(fixN(line2.slice(0,6)), false);
-    if (dob) data.dob = dob;
-    const sex = validateSexOrBlank(line2[7]);
-    if (sex) data.sex = sex;
-    const expiry = mrzYYMMDDToDisplay(fixN(line2.slice(8,14)), true);
-    if (expiry) data.expiry = expiry;
-  }
-
-  return data;
-}
-
-
-function mergeAndApplyMrzBackfill(merged) {
-  const front = merged.front || {};
-  const back = merged.back || {};
-
-  const mrz = {
-    nin: back.nin || '',
-    dob: back.dob || '',
-    sex: back.sex || '',
-    surname: back.surname || '',
-    given_names: back.given_names || ''
-  };
-
-  // Validation results for confidence
-  const confidence = {};
-
-  // Determine final values:
-  // - Use front values if they pass strict validation.
-  // - Back MRZ fills any missing/failed validation.
-  let out = {
-    surname: '',
-    given_names: '',
-    sex: '',
-    dob: '',
-    expiry: '',
-    nationality: front.nationality || back.nationality || 'UGA',
-    nin: '',
-    card_no: '',
-    village: back.village || '',
-    parish: back.parish || '',
-    sub_county: '',
-    county: '',
-    district: back.district || '',
-  };
-
-  // Fill from front with validation already strict in parseFront.
-  out.card_no = back.card_no || '';
-  out.expiry  = back.expiry  || '';
-  out.nin = front.nin || '';
-  out.dob = front.dob || '';
-  out.sex = front.sex || '';
-  out.surname = front.surname || '';
-  out.given_names = front.given_names || '';
-
-  // Apply MRZ backfill for any front empty/failed validation
-  // NIN
-  if (!validateNin(out.nin) && mrz.nin) {
-    out.nin = mrz.nin;
-  }
-  // DOB
-  if (!parseAndFormatDob(out.dob) && mrz.dob) {
-    out.dob = mrz.dob;
-  }
-  // Sex
-  if (!validateSexOrBlank(out.sex) && mrz.sex) {
-    out.sex = mrz.sex;
-  }
-  // Names
-  const surnameNorm = normalizeNameStrict(out.surname);
-  if (!isPersonNameStrict(surnameNorm) && mrz.surname) out.surname = mrz.surname;
-  const givenNorm = normalizeNameStrict(out.given_names);
-  if (!isPersonNameStrict(givenNorm) && mrz.given_names) out.given_names = mrz.given_names;
-
-  // Confidence score per field:
-  // high: value passed validation AND matched MRZ
-  // medium: value passed validation but no MRZ match
-  // low: value from fallback only
-  const fields = [
-    { key: 'nin', get: () => out.nin, valid: v => !!validateNin(v), mrz: mrz.nin },
-    { key: 'dob', get: () => out.dob, valid: v => !!parseAndFormatDob(v), mrz: mrz.dob },
-    { key: 'sex', get: () => out.sex, valid: v => !!validateSexOrBlank(v), mrz: mrz.sex },
-    { key: 'surname', get: () => out.surname, valid: v => isPersonNameStrict(normalizeNameStrict(v)), mrz: mrz.surname },
-    { key: 'given_names', get: () => out.given_names, valid: v => isPersonNameStrict(normalizeNameStrict(v)), mrz: mrz.given_names }
-  ];
-
-  for (const f of fields) {
-    const val = f.get();
-    const mrzVal = f.mrz;
-    const passes = f.valid(val);
-    const matchesMrz = passes && mrzVal && String(val).toUpperCase().trim() === String(mrzVal).toUpperCase().trim();
-
-    let level = 'low';
-    if (passes && matchesMrz) level = 'high';
-    else if (passes && !matchesMrz) level = 'medium';
-    else {
-      // fallback: if present but didn't pass, keep low only when MRZ was used
-      level = passes ? 'medium' : 'low';
-    }
-    confidence[f.key] = level;
-  }
-
-  out.confidence = confidence;
-  return out;
-}
+// Duplicate helper functions and parsers removed. Using globals from parser.js.
 
 function applyConfidenceBorders(conf) {
   // green/amber/red border
@@ -883,10 +417,7 @@ function applyConfidenceBorders(conf) {
     sex: 'f-sex',
     dob: 'f-dob',
     nin: 'f-nin',
-    // location not specified but we can default to low
-    village: 'f-village',
-    parish: 'f-parish',
-    district: 'f-district'
+    expiry: 'f-expiry'
   };
 
   Object.keys(mapFieldToId).forEach(k => {
@@ -925,19 +456,10 @@ function fillForm(d) {
   set('f-surname', d.surname);
   set('f-given', d.given_names);
   set('f-sex', d.sex);
-  set('f-nationality', d.nationality || 'UGA');
   set('f-dob', d.dob);
-  set('f-expiry', d.expiry);
   set('f-nin', d.nin);
-  set('f-cardno', d.card_no);
-  set('f-village', d.village);
-  set('f-parish', d.parish);
-  set('f-subcounty', d.sub_county);
-  set('f-county', d.county);
-  set('f-district', d.district);
-
-  const dateEl = document.getElementById('f-date');
-  if (dateEl) dateEl.value = todayISO();
+  set('f-expiry', d.expiry);
+  set('f-nationality', d.nationality);
 }
 
 // ─── Save record ──────────────────────────────
@@ -959,20 +481,11 @@ function saveRecord() {
     given_names: g('f-given'),
     full_name: (g('f-surname') + ' ' + g('f-given')).trim(),
     sex: g('f-sex'),
-    nationality: g('f-nationality'),
     dob: g('f-dob'),
-    expiry: g('f-expiry'),
     nin: g('f-nin'),
-    card_no: g('f-cardno'),
-    phone: g('f-phone'),
-    village: g('f-village'),
-    parish: g('f-parish'),
-    sub_county: g('f-subcounty'),
-    county: g('f-county'),
-    district: g('f-district'),
-    officer: g('f-officer'),
-    date_collected: g('f-date'),
-    notes: g('f-notes')
+    expiry: g('f-expiry'),
+    nationality: g('f-nationality'),
+    phone: g('f-phone')
   };
 
   state.records.push(record);
@@ -997,7 +510,7 @@ function resetCapture() {
       back:  `<svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>`
     };
     const labels = { front: 'Front of ID', back: 'Back of ID' };
-    const subs = { front: 'Name · NIN · DOB · Expiry', back: 'Village · Parish · District' };
+    const subs = { front: 'Name · NIN · DOB · Sex', back: 'Back MRZ (optional backup)' };
 
     inner.innerHTML = `
       ${icons[side]}
@@ -1016,9 +529,7 @@ function resetCapture() {
   document.getElementById('raw-back-text').textContent = '';
 
   const fields = [
-    'f-surname','f-given','f-sex','f-nationality','f-dob','f-expiry',
-    'f-nin','f-cardno','f-phone','f-village','f-parish',
-    'f-subcounty','f-county','f-district','f-officer','f-notes'
+    'f-surname','f-given','f-sex','f-dob','f-nin','f-expiry','f-nationality','f-phone'
   ];
 
   fields.forEach(id => {
@@ -1056,13 +567,13 @@ function renderRecordsTable() {
       <td><span class="sn-chip">${r.sn}</span></td>
       <td class="name-cell">
         <strong>${r.surname || '—'}</strong> ${r.given_names || ''}
-        <small>${r.sex || ''}${r.nationality ? ' · ' + r.nationality : ''}</small>
       </td>
+      <td>${r.nationality || '—'}</td>
+      <td>${r.sex || '—'}</td>
       <td style="font-family:monospace;font-size:11px">${r.nin || '—'}</td>
       <td>${r.dob || '—'}</td>
+      <td>${r.expiry || '—'}</td>
       <td>${r.phone || '—'}</td>
-      <td>${r.village || '—'}</td>
-      <td>${r.district || '—'}</td>
     </tr>
   `).join('');
 
@@ -1073,11 +584,12 @@ function renderRecordsTable() {
           <tr>
             <th>#</th>
             <th>Name</th>
+            <th>Nationality</th>
+            <th>Sex</th>
             <th>NIN</th>
             <th>DOB</th>
+            <th>Expiry</th>
             <th>Phone</th>
-            <th>Village</th>
-            <th>District</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -1101,32 +613,20 @@ function exportExcel() {
 
   const rows = state.records.map(r => ({
     'S/N': r.sn,
+    'NIN': r.nin,
     'SURNAME': r.surname,
     'GIVEN NAMES': r.given_names,
     'FULL NAME': r.full_name,
-    'SEX': r.sex,
     'NATIONALITY': r.nationality,
+    'SEX': r.sex,
     'DATE OF BIRTH': r.dob,
     'DATE OF EXPIRY': r.expiry,
-    'NIN': r.nin,
-    'CARD NUMBER': r.card_no,
-    'PHONE NUMBER': r.phone,
-    'VILLAGE': r.village,
-    'PARISH': r.parish,
-    'SUB COUNTY': r.sub_county,
-    'COUNTY': r.county,
-    'DISTRICT': r.district,
-    'DATE COLLECTED': r.date_collected,
-    'COLLECTED BY': r.officer,
-    'NOTES / FLAGS': r.notes
+    'PHONE NUMBER': r.phone
   }));
 
   const ws = XLSX.utils.json_to_sheet(rows);
   ws['!cols'] = [
-    {wch:5},{wch:14},{wch:18},{wch:24},{wch:5},{wch:12},
-    {wch:14},{wch:14},{wch:17},{wch:13},{wch:14},
-    {wch:14},{wch:14},{wch:16},{wch:14},{wch:13},
-    {wch:15},{wch:16},{wch:26}
+    {wch:5},{wch:17},{wch:14},{wch:18},{wch:24},{wch:14},{wch:5},{wch:14},{wch:14},{wch:14}
   ];
 
   const headerStyle = {
@@ -1183,7 +683,6 @@ function sleep(ms) {
 
 // ─── Init ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  const el = document.getElementById('f-date');
-  if (el) el.value = todayISO();
+  // Empty init
 });
 
