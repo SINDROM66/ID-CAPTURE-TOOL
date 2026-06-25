@@ -994,7 +994,10 @@ function resetCapture() {
 
   // Reset upload zones
   ['front', 'back'].forEach(side => {
-    document.getElementById('input-' + side).value = '';
+    const elGal = document.getElementById('input-' + side + '-gallery');
+    const elCam = document.getElementById('input-' + side + '-camera');
+    if (elGal) elGal.value = '';
+    if (elCam) elCam.value = '';
     const zone = document.getElementById('zone-' + side);
     const inner = document.getElementById('zone-' + side + '-inner');
     zone.classList.remove('loaded');
@@ -1182,6 +1185,37 @@ function todayISO() {
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
+
+// ─── Photo Source Selector Modal ──────────────
+function showSourceSelector(side) {
+  const modal = document.getElementById('source-selector-modal');
+  const sideName = document.getElementById('source-side-name');
+  const btnCamera = document.getElementById('btn-source-camera');
+  const btnGallery = document.getElementById('btn-source-gallery');
+  const btnCancel = document.getElementById('btn-source-cancel');
+
+  if (!modal || !sideName || !btnCamera || !btnGallery || !btnCancel) return;
+
+  sideName.textContent = side === 'front' ? 'front' : 'back';
+  modal.style.display = 'flex';
+
+  btnCamera.onclick = () => {
+    modal.style.display = 'none';
+    const input = document.getElementById(`input-${side}-camera`);
+    if (input) input.click();
+  };
+
+  btnGallery.onclick = () => {
+    modal.style.display = 'none';
+    const input = document.getElementById(`input-${side}-gallery`);
+    if (input) input.click();
+  };
+
+  btnCancel.onclick = () => {
+    modal.style.display = 'none';
+  };
+}
+window.showSourceSelector = showSourceSelector;
 
 // ─── Init ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {

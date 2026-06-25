@@ -777,3 +777,138 @@ tbody tr:hover td { background: #f5faff; }
   justify-content: flex-end;
 }
 
+/* ─── Photo Source Selector Modal ────────── */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(13, 79, 130, 0.4);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+  animation: fadeIn 0.25s ease-out;
+}
+
+.modal-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--primary);
+  margin: 0;
+}
+
+.modal-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0 0 4px 0;
+}
+
+.source-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.btn-source {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.btn-source:hover {
+  border-color: var(--primary);
+  background: var(--primary-light);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(13, 79, 130, 0.05);
+}
+
+.btn-source:active {
+  transform: translateY(0);
+}
+
+.source-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  background: var(--primary-light);
+  color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.btn-source:hover .source-icon {
+  background: var(--primary);
+  color: #fff;
+}
+
+.source-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.source-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.source-text strong {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.source-text span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.btn-cancel-source {
+  width: 100%;
+  justify-content: center;
+  padding: 12px;
+  border-radius: 12px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
