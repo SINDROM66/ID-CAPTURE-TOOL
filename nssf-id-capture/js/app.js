@@ -14,6 +14,412 @@ const state = {
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
 
+// ─── OpenCV.js Integration & Pre-processing ───
+let isOpenCvLoaded = false;
+let openCvLoadCallbacks = [];
+
+function onOpenCvReady() {
+  console.log('OpenCV.js has loaded successfully.');
+  isOpenCvLoaded = true;
+  while (openCvLoadCallbacks.length > 0) {
+    const cb = openCvLoadCallbacks.shift();
+    try { cb(); } catch (e) { console.error(e); }
+  }
+}
+
+// In case OpenCV loaded before app.js parsed
+if (typeof cv !== 'undefined' && cv.Mat) {
+  isOpenCvLoaded = true;
+}
+
+// Attach to window so the async script onload can call it
+window.onOpenCvReady = onOpenCvReady;
+
+function waitForOpenCv() {
+  return new Promise((resolve) => {
+    if (isOpenCvLoaded && typeof cv !== 'undefined' && cv.Mat) {
+      resolve();
+    } else {
+      openCvLoadCallbacks.push(resolve);
+    }
+  });
+}
+
+/**
+ * Card boundary detection using OpenCV.js
+ */
+function detectCardBoundary(img) {
+  let src;
+  try {
+    src = cv.imread(img);
+  } catch (e) {
+    console.error('Error reading image into cv.Mat:', e);
+    return null;
+  }
+  
+  let gray = new cv.Mat();
+  let blurred = new cv.Mat();
+  let edged = new cv.Mat();
+  let contours = new cv.MatVector();
+  let hierarchy = new cv.Mat();
+
+  // 1. Convert to grayscale and apply Gaussian blur (kernel 5x5)
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  let ksize = new cv.Size(5, 5);
+  cv.GaussianBlur(gray, blurred, ksize, 0, 0, cv.BORDER_DEFAULT);
+
+  // TUNING: lower=75 upper=200 — raise lower to 100 if holographic texture causes false contours
+  cv.Canny(blurred, edged, 75, 200, 3, false);
+
+  // 3. Find external contours
+  cv.findContours(edged, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let cardContour = null;
+  let maxArea = 0;
+
+  // 4. Loop through contours
+  for (let i = 0; i < contours.size(); ++i) {
+    let contour = contours.get(i);
+    let area = cv.contourArea(contour);
+    if (area < 5000) {
+      contour.delete();
+      continue;
+    }
+
+    let perimeter = cv.arcLength(contour, true);
+    let approx = new cv.Mat();
+    cv.approxPolyDP(contour, approx, 0.02 * perimeter, true);
+
+    if (approx.rows === 4) {
+      // Validate aspect ratio and area
+      let rect = cv.minAreaRect(contour);
+      let w = rect.size.width;
+      let h = rect.size.height;
+      let aspectRatio = w > h ? w / h : h / w;
+      
+      const imgArea = src.cols * src.rows;
+      const areaRatio = area / imgArea;
+      
+      // CR80 Card aspect ratio is ~1.58. We check if it is between 1.2 and 1.9.
+      // We also check if the card occupies between 10% and 90% of the image.
+      if (aspectRatio >= 1.2 && aspectRatio <= 1.9 && areaRatio >= 0.10 && areaRatio <= 0.90) {
+        if (area > maxArea) {
+          maxArea = area;
+          if (cardContour) {
+            cardContour.delete();
+          }
+          cardContour = approx;
+        } else {
+          approx.delete();
+        }
+      } else {
+        approx.delete();
+      }
+    } else {
+      approx.delete();
+    }
+    contour.delete();
+  }
+
+  // Extract points if found
+  let points = null;
+  if (cardContour) {
+    points = [];
+    for (let i = 0; i < 4; ++i) {
+      points.push({
+        x: cardContour.data32S[i * 2],
+        y: cardContour.data32S[i * 2 + 1]
+      });
+    }
+    cardContour.delete();
+  }
+
+  // Cleanup
+  src.delete();
+  gray.delete();
+  blurred.delete();
+  edged.delete();
+  contours.delete();
+  hierarchy.delete();
+
+  return points;
+}
+
+/**
+ * Sort corner points: [top-left, top-right, bottom-right, bottom-left]
+ */
+function orderCorners(pts) {
+  // Sort by y coordinate first (top pair vs bottom pair)
+  const sortedByY = [...pts].sort((a, b) => a.y - b.y);
+  
+  // Sort the top pair by x coordinate
+  const topPair = [sortedByY[0], sortedByY[1]].sort((a, b) => a.x - b.x);
+  const topLeft = topPair[0];
+  const topRight = topPair[1];
+  
+  // Sort the bottom pair by x coordinate
+  const bottomPair = [sortedByY[2], sortedByY[3]].sort((a, b) => a.x - b.x);
+  const bottomLeft = bottomPair[0];
+  const bottomRight = bottomPair[1];
+  
+  return [topLeft, topRight, bottomRight, bottomLeft];
+}
+
+/**
+ * Warp perspective to exactly 856x540 pixels
+ */
+function warpCard(img, orderedPts) {
+  let src = cv.imread(img);
+  let dst = new cv.Mat();
+  
+  // Source coordinates
+  let srcCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    orderedPts[0].x, orderedPts[0].y,
+    orderedPts[1].x, orderedPts[1].y,
+    orderedPts[2].x, orderedPts[2].y,
+    orderedPts[3].x, orderedPts[3].y
+  ]);
+  
+  // Destination coordinates (856x540 pixels)
+  let dstCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [
+    0, 0,
+    856, 0,
+    856, 540,
+    0, 540
+  ]);
+  
+  let M = cv.getPerspectiveTransform(srcCoords, dstCoords);
+  let dsize = new cv.Size(856, 540);
+  cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+  
+  const canvas = document.createElement('canvas');
+  canvas.width = 856;
+  canvas.height = 540;
+  cv.imshow(canvas, dst);
+  
+  // Cleanup
+  src.delete();
+  dst.delete();
+  srcCoords.delete();
+  dstCoords.delete();
+  M.delete();
+  
+  return canvas;
+}
+
+/**
+ * Manual corner selection interactive canvas overlay
+ */
+function runManualCornerSelection(img) {
+  return new Promise((resolve, reject) => {
+    const overlay = document.getElementById('corner-overlay');
+    const canvas = document.getElementById('corner-canvas');
+    const btnConfirm = document.getElementById('btn-corner-confirm');
+    const btnCancel = document.getElementById('btn-corner-cancel');
+    
+    overlay.style.display = 'flex';
+    
+    // Scale image to fit inside 800x600 for editing canvas
+    let scale = 1.0;
+    if (img.naturalWidth > 800 || img.naturalHeight > 600) {
+      scale = Math.min(800 / img.naturalWidth, 600 / img.naturalHeight);
+    }
+    canvas.width = img.naturalWidth * scale;
+    canvas.height = img.naturalHeight * scale;
+    
+    // Initialize 4 corners in a centered card layout
+    const pts = [
+      { x: canvas.width * 0.15, y: canvas.height * 0.20 }, // top-left
+      { x: canvas.width * 0.85, y: canvas.height * 0.20 }, // top-right
+      { x: canvas.width * 0.85, y: canvas.height * 0.80 }, // bottom-right
+      { x: canvas.width * 0.15, y: canvas.height * 0.80 }  // bottom-left
+    ];
+    
+    let activeIndex = -1;
+    const HANDLE_RADIUS = 15;
+    
+    function getDistance(p1, p2) {
+      return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    function getEventPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return {
+        x: (clientX - rect.left) * (canvas.width / rect.width),
+        y: (clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+
+    const ctx = canvas.getContext('2d');
+    function draw() {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      
+      // Draw standard green bounding outline
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+      ctx.closePath();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#00e676';
+      ctx.stroke();
+      
+      // Translucent card highlight
+      ctx.fillStyle = 'rgba(0, 230, 118, 0.15)';
+      ctx.fill();
+
+      // Draw handles
+      pts.forEach((pt, i) => {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, HANDLE_RADIUS, 0, 2 * Math.PI);
+        ctx.fillStyle = activeIndex === i ? '#ff1744' : '#00e676';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+      });
+    }
+    
+    function handleStart(e) {
+      const pos = getEventPos(e);
+      let nearestIdx = -1;
+      let minDistance = HANDLE_RADIUS * 1.5; // tolerance
+      for (let i = 0; i < pts.length; i++) {
+        const dist = getDistance(pos, pts[i]);
+        if (dist < minDistance) {
+          minDistance = dist;
+          nearestIdx = i;
+        }
+      }
+      activeIndex = nearestIdx;
+      if (activeIndex !== -1) {
+        e.preventDefault();
+        draw();
+      }
+    }
+
+    function handleMove(e) {
+      if (activeIndex === -1) return;
+      e.preventDefault();
+      const pos = getEventPos(e);
+      pts[activeIndex].x = Math.max(0, Math.min(canvas.width, pos.x));
+      pts[activeIndex].y = Math.max(0, Math.min(canvas.height, pos.y));
+      draw();
+    }
+
+    function handleEnd() {
+      if (activeIndex !== -1) {
+        activeIndex = -1;
+        draw();
+      }
+    }
+    
+    canvas.addEventListener('mousedown', handleStart);
+    canvas.addEventListener('mousemove', handleMove);
+    canvas.addEventListener('mouseup', handleEnd);
+    canvas.addEventListener('mouseleave', handleEnd);
+
+    canvas.addEventListener('touchstart', handleStart, { passive: false });
+    canvas.addEventListener('touchmove', handleMove, { passive: false });
+    canvas.addEventListener('touchend', handleEnd);
+    canvas.addEventListener('touchcancel', handleEnd);
+    
+    draw();
+    
+    function cleanupListeners() {
+      canvas.removeEventListener('mousedown', handleStart);
+      canvas.removeEventListener('mousemove', handleMove);
+      canvas.removeEventListener('mouseup', handleEnd);
+      canvas.removeEventListener('mouseleave', handleEnd);
+      canvas.removeEventListener('touchstart', handleStart);
+      canvas.removeEventListener('touchmove', handleMove);
+      canvas.removeEventListener('touchend', handleEnd);
+      canvas.removeEventListener('touchcancel', handleEnd);
+    }
+    
+    btnConfirm.onclick = () => {
+      cleanupListeners();
+      overlay.style.display = 'none';
+      const finalPts = pts.map(pt => ({
+        x: pt.x / scale,
+        y: pt.y / scale
+      }));
+      resolve(finalPts);
+    };
+    
+    btnCancel.onclick = () => {
+      cleanupListeners();
+      overlay.style.display = 'none';
+      reject(new Error('Manual corner selection cancelled'));
+    };
+  });
+}
+
+/**
+ * Draws the warped canvas onto the visible debug canvas for step 2 verification
+ */
+function drawDebugCanvas(warpedCanvas) {
+  const debugContainer = document.getElementById('debug-warp-container');
+  const debugCanvas = document.getElementById('debugWarpCanvas');
+  if (debugContainer && debugCanvas) {
+    debugContainer.style.display = 'block';
+    const ctx = debugCanvas.getContext('2d');
+    ctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+    ctx.drawImage(warpedCanvas, 0, 0, debugCanvas.width, debugCanvas.height);
+  }
+}
+
+/**
+ * Pre-processes the card image: auto detects card, orders corners, fallbacks if needed, and warps.
+ * Ensures the manual corner selection overlay blocks execution until user confirms.
+ */
+function getWarpedCanvasOrFallback(img, side) {
+  return new Promise((resolve, reject) => {
+    // 1. Try auto-detect
+    let corners = detectCardBoundary(img);
+    if (corners) {
+      console.log(`Auto-detection succeeded for ${side} card.`);
+      try {
+        const ordered = orderCorners(corners);
+        const warped = warpCard(img, ordered);
+        
+        // Draw to debug canvas (Step 2)
+        drawDebugCanvas(warped);
+        
+        resolve(warped);
+      } catch (err) {
+        reject(err);
+      }
+    } else {
+      console.log(`Auto-detection failed for ${side} card. Prompting manual UI.`);
+      // 2. Fall back to manual corner selection
+      runManualCornerSelection(img).then((manualCorners) => {
+        try {
+          const ordered = orderCorners(manualCorners);
+          const warped = warpCard(img, ordered);
+          
+          // Draw to debug canvas (Step 2)
+          drawDebugCanvas(warped);
+          
+          resolve(warped);
+        } catch (err) {
+          reject(err);
+        }
+      }).catch((err) => {
+        reject(err);
+      });
+    }
+  });
+}
+
 // ─── Image alignment & ROI extraction helpers ───
 function loadImage(file) {
   return new Promise((resolve, reject) => {
@@ -186,7 +592,12 @@ function isNavyColor(r, g, b) {
 
 function detectIsSynthetic(canvas) {
   const ctx = canvas.getContext('2d');
-  const pixel = ctx.getImageData(500, 30, 1, 1).data;
+  // Scale coordinates (500, 30) from 1000x630 virtual grid to actual canvas dimensions
+  const scaleX = canvas.width / 1000;
+  const scaleY = canvas.height / 630;
+  const px = Math.round(500 * scaleX);
+  const py = Math.round(30 * scaleY);
+  const pixel = ctx.getImageData(px, py, 1, 1).data;
   return isNavyColor(pixel[0], pixel[1], pixel[2]);
 }
 
@@ -216,183 +627,231 @@ async function runOCR() {
   document.getElementById('card-progress').style.display = 'block';
   document.getElementById('card-form').style.display = 'none';
 
-  let rawFront = '', rawBack = '';
-  let frontData = {}, backData = {};
-  let roiFront = {};
+  // Make sure debug container is hidden at start of a new run
+  const debugContainer = document.getElementById('debug-warp-container');
+  if (debugContainer) debugContainer.style.display = 'none';
 
   try {
+    // Wait for OpenCV.js if not loaded yet
+    if (!isOpenCvLoaded || typeof cv === 'undefined' || !cv.Mat) {
+      setProgress(2, 'Loading OpenCV.js engine…', 'Caching resources for offline use');
+      await waitForOpenCv();
+    }
+
+    let frontCanvas = null;
+    let backCanvas = null;
+
     if (state.files.front) {
       setProgress(5, 'Loading front of ID…', 'Preparing image');
       const img = await loadImage(state.files.front);
-      const frontCanvas = alignCardToStandard(img);
-
-      // Detect layout (synthetic vs real card)
-      const isSyn = detectIsSynthetic(frontCanvas);
-      state.isSynthetic = isSyn;
-      const frontRois = isSyn ? SYNTHETIC_FRONT_ROIS : FRONT_ROIS;
-
-      setProgress(15, 'Reading front ROIs in parallel…', 'Running Tesseract workers');
-
-      // Parallel extraction for front
-      const fields = Object.keys(frontRois);
-      const frontPromises = fields.map(async (field) => {
-        const settings = FIELD_OCR_SETTINGS[field];
-        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker.setParameters({
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: settings.whitelist || '',
-          tessedit_pageseg_mode: settings.psm
-        });
-
-        const cropped = cropROI(frontCanvas, frontRois[field], field);
-        const preprocessed = preprocessROI(cropped, 3.0);
-        const dataUrl = preprocessed.toDataURL('image/png');
-
-        const result = await worker.recognize(dataUrl);
-        await worker.terminate();
-        return { field, text: (result.data.text || '').trim() };
-      });
-
-      const frontResults = await Promise.all(frontPromises);
-      frontResults.forEach(r => {
-        roiFront[r.field] = r.text;
-      });
-
-      frontData = {
-        surname:     normalizeNameStrict(roiFront.surname),
-        given_names: normalizeNameStrict(roiFront.given_names),
-        nationality: roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '',
-        sex:         validateSexOrBlank(roiFront.sex),
-        dob:         parseAndFormatDob(roiFront.dob),
-        nin:         validateNin(roiFront.nin) || roiFront.nin,
-        expiry:      parseAndFormatDob(roiFront.expiry) || roiFront.expiry,
-        card_no:     roiFront.card_no.replace(/[^0-9]/g, '')
-      };
-
-      rawFront = `SURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
+      
+      setProgress(7, 'Aligning front of ID…', 'Auto-detecting card edges');
+      frontCanvas = await getWarpedCanvasOrFallback(img, 'front');
     }
 
     if (state.files.back) {
       setProgress(50, 'Loading back of ID…', 'Preparing image');
       const img = await loadImage(state.files.back);
-      const backCanvas = alignCardToStandard(img);
 
-      const isSyn = state.isSynthetic;
-      const backRois = isSyn ? SYNTHETIC_BACK_ROIS : BACK_ROIS;
-
-      setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
-
-      const roiAddr = backRois.address_block;
-      const padX = 15;
-      const padY = 10;
-      const ax = Math.max(0, Math.round(roiAddr.x * backCanvas.width) - padX);
-      const ay = Math.max(0, Math.round(roiAddr.y * backCanvas.height) - padY);
-      const aw = Math.min(backCanvas.width - ax, Math.round(roiAddr.w * backCanvas.width) + 2 * padX);
-      const ah = Math.min(backCanvas.height - ay, Math.round(roiAddr.h * backCanvas.height) + 2 * padY);
-      const croppedAddr = document.createElement('canvas');
-      croppedAddr.width = aw;
-      croppedAddr.height = ah;
-      croppedAddr.getContext('2d').drawImage(backCanvas, ax, ay, aw, ah, 0, 0, aw, ah);
-      const preprocessedAddr = preprocessROI(croppedAddr, 2.0);
-      const dataUrlAddr = preprocessedAddr.toDataURL('image/png');
-
-      const mx = 5;
-      const my = Math.round(0.70 * backCanvas.height);
-      const mw = backCanvas.width - 2 * mx;
-      const mh = backCanvas.height - my;
-      const croppedMrz = document.createElement('canvas');
-      croppedMrz.width = mw;
-      croppedMrz.height = mh;
-      croppedMrz.getContext('2d').drawImage(backCanvas, mx, my, mw, mh, 0, 0, mw, mh);
-      const preprocessedMrz = preprocessROI(croppedMrz, 2.0);
-      const dataUrlMrz = preprocessedMrz.toDataURL('image/png');
-
-      const results = await Promise.all([
-        (async () => {
-          const worker0 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-          await worker0.setParameters({
-            preserve_interword_spaces: '1',
-            user_defined_dpi: '300',
-            tessedit_char_whitelist: '',
-            tessedit_pageseg_mode: '6'
-          });
-          const res = await worker0.recognize(dataUrlAddr);
-          await worker0.terminate();
-          return (res.data.text || '').trim();
-        })(),
-        (async () => {
-          const worker1 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-          await worker1.setParameters({
-            preserve_interword_spaces: '1',
-            user_defined_dpi: '300',
-            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-            tessedit_pageseg_mode: '6'
-          });
-          const res = await worker1.recognize(dataUrlMrz);
-          await worker1.terminate();
-          return (res.data.text || '').trim();
-        })()
-      ]);
-
-      const addrText = results[0];
-      const mrzText  = results[1];
-
-      const backAddrData = parseBack(addrText);
-      const backMrzData = parseMRZ(mrzText);
-
-      backData = Object.assign({}, backAddrData, {
-        card_no:     backMrzData.card_no     || backAddrData.card_no     || '',
-        expiry:      backMrzData.expiry      || backAddrData.expiry      || '',
-        nin:         backMrzData.nin         || backAddrData.nin         || '',
-        dob:         backMrzData.dob         || backAddrData.dob         || '',
-        sex:         backMrzData.sex         || backAddrData.sex         || '',
-        surname:     backMrzData.surname     || backAddrData.surname     || '',
-        given_names: backMrzData.given_names || backAddrData.given_names || '',
-        nationality: backMrzData.nationality || backAddrData.nationality || '',
-      });
-
-      rawBack = `ADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
+      setProgress(52, 'Aligning back of ID…', 'Auto-detecting card edges');
+      backCanvas = await getWarpedCanvasOrFallback(img, 'back');
     }
 
-    setProgress(95, 'Finalising…', 'Building form');
-    await sleep(150);
-
-    const merged = { front: frontData, back: backData };
-    const merged2 = mergeAndApplyMrzBackfill(merged);
-    fillForm(merged2);
-    applyConfidenceBorders(merged2.confidence || {});
-
-    const rawBlock = document.getElementById('raw-block');
-    rawBlock.style.display = 'block';
-    if (rawFront) document.getElementById('raw-front-text').textContent = '=== FRONT ===\n' + rawFront;
-    if (rawBack)  document.getElementById('raw-back-text').textContent  = '\n=== BACK ===\n' + rawBack;
-
-    const hasAny = [
-      'surname', 'given_names', 'sex', 'dob', 'nin', 'expiry'
-    ].some(k => merged2[k] && String(merged2[k]).trim().length > 0);
-
-    const identityRequired = ['nin', 'dob', 'sex', 'surname', 'expiry'];
-    const missingIdentity = identityRequired.filter(k => !merged2[k]);
-
-    const okNinDob = !!merged2.nin && !!merged2.dob;
-    const okSurnameDob = !!merged2.surname && !!merged2.dob;
-
-    const showSuccess = hasAny && (okNinDob || okSurnameDob);
-
-    document.getElementById('form-alert').innerHTML =
-      showSuccess
-        ? alert('warning', 'Data extracted — please <strong>review every field</strong> carefully before saving. OCR may have minor errors. Use the raw text below to verify.')
-        : alert('error', 'OCR could not confidently read enough identity data. Retake clear, close photos of the full card with no glare, then extract again.');
-
-    setProgress(100, 'Done', '');
-    console.log('OCR complete. merged2:', JSON.stringify(merged2));
+    await proceedWithWarpedImages(frontCanvas, backCanvas);
 
   } catch (err) {
     document.getElementById('form-alert').innerHTML = alert('error',
       'OCR failed: ' + (err && err.message ? err.message : JSON.stringify(err)) + '. Please fill the form manually.');
     fillForm({});
+    document.getElementById('card-progress').style.display = 'none';
+    document.getElementById('card-form').style.display = 'block';
+    document.getElementById('btn-extract').disabled = false;
+    state.ocr.running = false;
   }
+}
+
+/**
+ * Runs the OCR pipeline strictly on the warped 856x540 canvases
+ */
+async function proceedWithWarpedImages(frontCanvas, backCanvas) {
+  // Step 5 - Pre-flight size validation
+  if (frontCanvas) {
+    if (frontCanvas.width !== 856 || frontCanvas.height !== 540) {
+      console.error('Front canvas passed to OCR is not 856x540 — aborting');
+      document.getElementById('form-alert').innerHTML = alert('error', 'Card alignment failed. Please retake the photo.');
+      throw new Error('Front card alignment failed: output size must be exactly 856x540');
+    }
+  }
+  if (backCanvas) {
+    if (backCanvas.width !== 856 || backCanvas.height !== 540) {
+      console.error('Back canvas passed to OCR is not 856x540 — aborting');
+      document.getElementById('form-alert').innerHTML = alert('error', 'Card alignment failed. Please retake the photo.');
+      throw new Error('Back card alignment failed: output size must be exactly 856x540');
+    }
+  }
+
+  let rawFront = '', rawBack = '';
+  let frontData = {}, backData = {};
+  let roiFront = {};
+
+  if (frontCanvas) {
+    // Detect layout (synthetic vs real card)
+    const isSyn = detectIsSynthetic(frontCanvas);
+    state.isSynthetic = isSyn;
+    const frontRois = isSyn ? SYNTHETIC_FRONT_ROIS : FRONT_ROIS;
+
+    setProgress(15, 'Reading front ROIs in parallel…', 'Running Tesseract workers');
+
+    // Parallel extraction for front
+    const fields = Object.keys(frontRois);
+    const frontPromises = fields.map(async (field) => {
+      const settings = FIELD_OCR_SETTINGS[field];
+      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_char_whitelist: settings.whitelist || '',
+        tessedit_pageseg_mode: settings.psm
+      });
+
+      const cropped = cropROI(frontCanvas, frontRois[field], field);
+      const preprocessed = preprocessROI(cropped, 3.0);
+      const dataUrl = preprocessed.toDataURL('image/png');
+
+      const result = await worker.recognize(dataUrl);
+      await worker.terminate();
+      return { field, text: (result.data.text || '').trim() };
+    });
+
+    const frontResults = await Promise.all(frontPromises);
+    frontResults.forEach(r => {
+      roiFront[r.field] = r.text;
+    });
+
+    frontData = {
+      surname:     normalizeNameStrict(roiFront.surname),
+      given_names: normalizeNameStrict(roiFront.given_names),
+      nationality: roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '',
+      sex:         validateSexOrBlank(roiFront.sex),
+      dob:         parseAndFormatDob(roiFront.dob),
+      nin:         validateNin(roiFront.nin) || roiFront.nin,
+      expiry:      parseAndFormatDob(roiFront.expiry) || roiFront.expiry,
+      card_no:     roiFront.card_no.replace(/[^0-9]/g, '')
+    };
+
+    rawFront = `SURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
+  }
+
+  if (backCanvas) {
+    const isSyn = state.isSynthetic;
+    const backRois = isSyn ? SYNTHETIC_BACK_ROIS : BACK_ROIS;
+
+    setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
+
+    const roiAddr = backRois.address_block;
+    const padX = 15;
+    const padY = 10;
+    const ax = Math.max(0, Math.round(roiAddr.x * backCanvas.width) - padX);
+    const ay = Math.max(0, Math.round(roiAddr.y * backCanvas.height) - padY);
+    const aw = Math.min(backCanvas.width - ax, Math.round(roiAddr.w * backCanvas.width) + 2 * padX);
+    const ah = Math.min(backCanvas.height - ay, Math.round(roiAddr.h * backCanvas.height) + 2 * padY);
+    const croppedAddr = document.createElement('canvas');
+    croppedAddr.width = aw;
+    croppedAddr.height = ah;
+    croppedAddr.getContext('2d').drawImage(backCanvas, ax, ay, aw, ah, 0, 0, aw, ah);
+    const preprocessedAddr = preprocessROI(croppedAddr, 2.0);
+    const dataUrlAddr = preprocessedAddr.toDataURL('image/png');
+
+    const mx = 5;
+    const my = Math.round(0.70 * backCanvas.height);
+    const mw = backCanvas.width - 2 * mx;
+    const mh = backCanvas.height - my;
+    const croppedMrz = document.createElement('canvas');
+    croppedMrz.width = mw;
+    croppedMrz.height = mh;
+    croppedMrz.getContext('2d').drawImage(backCanvas, mx, my, mw, mh, 0, 0, mw, mh);
+    const preprocessedMrz = preprocessROI(croppedMrz, 2.0);
+    const dataUrlMrz = preprocessedMrz.toDataURL('image/png');
+
+    const results = await Promise.all([
+      (async () => {
+        const worker0 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker0.setParameters({
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_char_whitelist: '',
+          tessedit_pageseg_mode: '6'
+        });
+        const res = await worker0.recognize(dataUrlAddr);
+        await worker0.terminate();
+        return (res.data.text || '').trim();
+      })(),
+      (async () => {
+        const worker1 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker1.setParameters({
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+          tessedit_pageseg_mode: '6'
+        });
+        const res = await worker1.recognize(dataUrlMrz);
+        await worker1.terminate();
+        return (res.data.text || '').trim();
+      })()
+    ]);
+
+    const addrText = results[0];
+    const mrzText  = results[1];
+
+    const backAddrData = parseBack(addrText);
+    const backMrzData = parseMRZ(mrzText);
+
+    backData = Object.assign({}, backAddrData, {
+      card_no:     backMrzData.card_no     || backAddrData.card_no     || '',
+      expiry:      backMrzData.expiry      || backAddrData.expiry      || '',
+      nin:         backMrzData.nin         || backAddrData.nin         || '',
+      dob:         backMrzData.dob         || backAddrData.dob         || '',
+      sex:         backMrzData.sex         || backAddrData.sex         || '',
+      surname:     backMrzData.surname     || backAddrData.surname     || '',
+      given_names: backMrzData.given_names || backAddrData.given_names || '',
+      nationality: backMrzData.nationality || backAddrData.nationality || '',
+    });
+
+    rawBack = `ADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
+  }
+
+  setProgress(95, 'Finalising…', 'Building form');
+  await sleep(150);
+
+  const merged = { front: frontData, back: backData };
+  const merged2 = mergeAndApplyMrzBackfill(merged);
+  fillForm(merged2);
+  applyConfidenceBorders(merged2.confidence || {});
+
+  const rawBlock = document.getElementById('raw-block');
+  rawBlock.style.display = 'block';
+  if (rawFront) document.getElementById('raw-front-text').textContent = '=== FRONT ===\n' + rawFront;
+  if (rawBack)  document.getElementById('raw-back-text').textContent  = '\n=== BACK ===\n' + rawBack;
+
+  const hasAny = [
+    'surname', 'given_names', 'sex', 'dob', 'nin', 'expiry'
+  ].some(k => merged2[k] && String(merged2[k]).trim().length > 0);
+
+  const identityRequired = ['nin', 'dob', 'sex', 'surname', 'expiry'];
+  const missingIdentity = identityRequired.filter(k => !merged2[k]);
+
+  const okNinDob = !!merged2.nin && !!merged2.dob;
+  const okSurnameDob = !!merged2.surname && !!merged2.dob;
+
+  const showSuccess = hasAny && (okNinDob || okSurnameDob);
+
+  document.getElementById('form-alert').innerHTML =
+    showSuccess
+      ? alert('warning', 'Data extracted — please <strong>review every field</strong> carefully before saving. OCR may have minor errors. Use the raw text below to verify.')
+      : alert('error', 'OCR could not confidently read enough identity data. Retake clear, close photos of the full card with no glare, then extract again.');
+
+  setProgress(100, 'Done', '');
+  console.log('OCR complete. merged2:', JSON.stringify(merged2));
 
   document.getElementById('card-progress').style.display = 'none';
   document.getElementById('card-form').style.display = 'block';
@@ -527,6 +986,14 @@ function resetCapture() {
   document.getElementById('raw-block').style.display = 'none';
   document.getElementById('raw-front-text').textContent = '';
   document.getElementById('raw-back-text').textContent = '';
+
+  const debugContainer = document.getElementById('debug-warp-container');
+  if (debugContainer) debugContainer.style.display = 'none';
+  const debugCanvas = document.getElementById('debugWarpCanvas');
+  if (debugCanvas) {
+    const ctx = debugCanvas.getContext('2d');
+    ctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+  }
 
   const fields = [
     'f-surname','f-given','f-sex','f-dob','f-nin','f-expiry','f-nationality','f-phone'
