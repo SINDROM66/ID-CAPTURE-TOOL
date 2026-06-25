@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nssf-id-capture-v1';
+const CACHE_NAME = 'nssf-id-capture-v5';
 const ASSETS = [
   './',
   './index.html',
@@ -35,31 +35,21 @@ self.addEventListener('activate', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
-  // Only handle GET requests
   if (e.request.method !== 'GET') return;
 
+  // Stale-While-Revalidate strategy for app resources
   e.respondWith(
-    caches.match(e.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-      return fetch(e.request).then((response) => {
-        // Cache new successful requests dynamically
-        if (response && response.status === 200 && response.type === 'basic') {
-          const responseToCache = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(e.request, responseToCache);
-          });
-        } else if (response && response.status === 200 && e.request.url.includes('opencv.js')) {
-          const responseToCache = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(e.request, responseToCache);
-          });
-        }
-        return response;
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.match(e.request).then((cachedResponse) => {
+        const fetchPromise = fetch(e.request).then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            cache.put(e.request, networkResponse.clone());
+          }
+          return networkResponse;
+        }).catch(() => cachedResponse); // fallback to cache on network failure
+
+        return cachedResponse || fetchPromise;
       });
-    }).catch(() => {
-      // Offline fallback can be added here if needed
     })
   );
 });
