@@ -8,7 +8,7 @@
 'use strict';
 
 // ─── Regex constants ──────────────────────────────────────────────────────
-const NIN_REGEX = /^[CA][MF](\d{8}[A-Z0-9]{4}|\d{9}[A-Z0-9]{3})$/;
+const NIN_REGEX = /^[CAP][MF]\d{8}[A-Z0-9]{4}$/;
 
 // ─── Low-level helpers ────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ function normalizeNinCandidate(candidate, dob) {
   let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   // Extract a 14-character NIN candidate if present in a longer string, allowing OCR-garbled prefix and digits
-  const match = v.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
+  const match = v.match(/([CAP1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
   if (match) {
     let p = match[1];
     let d = match[2];
@@ -60,7 +60,8 @@ function normalizeNinCandidate(candidate, dob) {
     // Normalize prefix first character
     if (/[1G0OIL]/.test(p[0])) p = 'C' + p[1];
     else if (p[0] === '4') p = 'A' + p[1];
-    else if (!/[CA]/.test(p[0])) p = 'C' + p[1];
+    else if (p[0] === 'P') p = 'P' + p[1];
+    else if (!/[CAP]/.test(p[0])) p = 'C' + p[1];
     
     // Normalize prefix second character
     if (/[1NHK0OI8LH]/.test(p[1])) p = p[0] + 'M';
@@ -102,7 +103,7 @@ function normalizeNinCandidate(candidate, dob) {
   }
 
   // Auto-correct duplicate first zero/O (15-character edge case e.g. CMO0... or CM00...)
-  if (v.length === 15 && /^[CA][MF][0O]{2}/.test(v)) {
+  if (v.length === 15 && /^[CAP][MF][0O]{2}/.test(v)) {
     v = v.slice(0, 2) + v.slice(3);
   }
 
@@ -111,12 +112,13 @@ function normalizeNinCandidate(candidate, dob) {
   // Position-aware structural normalization
   const chars = v.split('');
 
-  // Positions 0-1: must be letters (prefix CM / CF / AM / AF)
+  // Positions 0-1: must be letters (prefix CM / CF / AM / AF / PM / PF)
   for (let i = 0; i <= 1; i++) {
     if (DIGIT_TO_LETTER[chars[i]]) chars[i] = DIGIT_TO_LETTER[chars[i]];
   }
   // Double-check prefix corrections
   if (chars[0] === 'I' || chars[0] === '1' || chars[0] === 'O' || chars[0] === '0') chars[0] = 'C';
+  else if (chars[0] !== 'A' && chars[0] !== 'P') chars[0] = 'C';
   if (chars[1] === 'N' || chars[1] === 'H' || chars[1] === 'K') chars[1] = 'M';
 
   // Apply DOB Year correction before standard letter-to-digit confusions
