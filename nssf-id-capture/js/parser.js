@@ -22,7 +22,11 @@ function normalizeOCRText(text) {
 
 // OCR confusion maps (bidirectional)
 const DIGIT_TO_LETTER = { '0':'O','1':'I','5':'S','8':'B','6':'G','4':'A','2':'Z','3':'J' };
-const LETTER_TO_DIGIT = { 'O':'0','I':'1','S':'5','B':'8','G':'6','A':'4','Z':'2' };
+const LETTER_TO_DIGIT = { 
+  'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
+  'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
+  'P':'9', 'H':'8' 
+};
 
 // Uganda NIN structure: [C][M|F][9 digits][3 letters] = 14 chars total
 // Position 0-1  : must be letters (CM or CF prefix)
@@ -43,11 +47,11 @@ function cleanMrzNameToken(t) {
   });
 }
 
-function normalizeNinCandidate(candidate) {
+function normalizeNinCandidate(candidate, dob) {
   let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   // Extract a 14-character NIN candidate if present in a longer string, allowing OCR-garbled prefix and digits
-  const match = v.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQ]{9})([A-Z0-9]{3,8})/i);
+  const match = v.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
   if (match) {
     let p = match[1];
     let d = match[2];
@@ -63,8 +67,31 @@ function normalizeNinCandidate(candidate) {
     else if (/[PRE35]/.test(p[1])) p = p[0] + 'F';
     else if (!/[MF]/.test(p[1])) p = p[0] + 'M';
     
+    // DOB Year alignment for first two digits of digits group
+    if (dob && dob.includes('.')) {
+      const parts = dob.split('.');
+      if (parts.length === 3) {
+        const year = parts[2];
+        if (year && year.length === 4) {
+          const yy = year.slice(2);
+          const dChars = d.split('');
+          if (dChars[0] !== yy[0] && (dChars[0] === 'E' || dChars[0] === 'C' || !/[0-9]/.test(dChars[0]))) {
+            dChars[0] = yy[0];
+          }
+          if (dChars[1] !== yy[1] && (dChars[1] === 'R' || dChars[1] === 'B' || !/[0-9]/.test(dChars[1]))) {
+            dChars[1] = yy[1];
+          }
+          d = dChars.join('');
+        }
+      }
+    }
+
     // Normalize digits (positions 2-10)
-    const digitsMap = { 'O':'0','I':'1','S':'5','B':'8','G':'6','A':'4','Z':'2','D':'0','E':'0','Q':'0' };
+    const digitsMap = { 
+      'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
+      'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
+      'P':'9', 'H':'8' 
+    };
     let cleanDigits = d.split('').map(c => digitsMap[c] || c).join('');
     
     // Normalize suffix (positions 11-13)
@@ -92,9 +119,31 @@ function normalizeNinCandidate(candidate) {
   if (chars[0] === 'I' || chars[0] === '1' || chars[0] === 'O' || chars[0] === '0') chars[0] = 'C';
   if (chars[1] === 'N' || chars[1] === 'H' || chars[1] === 'K') chars[1] = 'M';
 
+  // Apply DOB Year correction before standard letter-to-digit confusions
+  if (dob && dob.includes('.')) {
+    const parts = dob.split('.');
+    if (parts.length === 3) {
+      const year = parts[2];
+      if (year && year.length === 4) {
+        const yy = year.slice(2);
+        if (chars[2] !== yy[0] && (!/[0-9]/.test(chars[2]) || chars[2] === 'E' || chars[2] === 'C')) {
+          chars[2] = yy[0];
+        }
+        if (chars[3] !== yy[1] && (!/[0-9]/.test(chars[3]) || chars[3] === 'R' || chars[3] === 'B')) {
+          chars[3] = yy[1];
+        }
+      }
+    }
+  }
+
   // Positions 2-10: must be digits
+  const LETTER_TO_DIGIT_EXPANDED = { 
+    'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
+    'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
+    'P':'9', 'H':'8' 
+  };
   for (let i = 2; i <= 10; i++) {
-    if (LETTER_TO_DIGIT[chars[i]]) chars[i] = LETTER_TO_DIGIT[chars[i]];
+    if (LETTER_TO_DIGIT_EXPANDED[chars[i]]) chars[i] = LETTER_TO_DIGIT_EXPANDED[chars[i]];
   }
 
   // Positions 11-13: must be letters
@@ -119,8 +168,8 @@ function fixDigitsOnly(str) {
     .replace(/Q/g, '0'); // MRZ monospace: '0' sometimes read as 'Q' in digit-only zones
 }
 
-function validateNin(n) {
-  const v = normalizeNinCandidate(n);
+function validateNin(n, dob) {
+  const v = normalizeNinCandidate(n, dob);
   return NIN_REGEX.test(v) ? v : '';
 }
 
@@ -263,15 +312,6 @@ function parseFront(raw) {
   const up = normalizeOCRText(raw);
   const lines = up.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-  // NIN
-  const words = up.split(/[\s|]+/).filter(Boolean);
-  let nin = '';
-  for (const w of words) {
-    const candidate = validateNin(w);
-    if (candidate) { nin = candidate; break; }
-  }
-  if (nin) data.nin = nin;
-
   // Dates: DOB = first, Expiry = second
   const dates = [];
   const dateMatches = up.matchAll(/\b\d{2}[.\/\-]\d{2}[.\/\-]\d{4}\b/g);
@@ -281,6 +321,15 @@ function parseFront(raw) {
   }
   if (dates[0]) data.dob = dates[0];
   if (dates[1]) data.expiry = dates[1];
+
+  // NIN (uses DOB for prefix Year of Birth reconciliation if available)
+  const words = up.split(/[\s|]+/).filter(Boolean);
+  let nin = '';
+  for (const w of words) {
+    const candidate = validateNin(w, data.dob);
+    if (candidate) { nin = candidate; break; }
+  }
+  if (nin) data.nin = nin;
 
   // Sex
   const sexMatch = up.match(/\bSEX\s+[\s\S]{0,60}\b([MF])\b/);
@@ -536,6 +585,36 @@ function parseMRZ(text) {
     line3 = lines[2];
   }
 
+  // Parse Line 2: dob, sex, expiry (parsed first so DOB is available for Line 1 NIN year alignment)
+  let mrzDob = '';
+  if (line2) {
+    const r2start = line2.search(/[0-9]/);
+    const raw2trim = r2start >= 0 ? line2.slice(r2start) : line2;
+    
+    const dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
+    if (dob) {
+      data.dob = dob;
+      mrzDob = dob;
+    }
+
+    const ugaIdx = raw2trim.search(/[UT][GS][AT]/);
+    let isCompactFormat = true;
+    if (ugaIdx >= 15) {
+      isCompactFormat = false;
+    } else if (ugaIdx < 0) {
+      isCompactFormat = !/[0-9]/.test(raw2trim[6] || '');
+    }
+    
+    const sexPos     = isCompactFormat ? 6 : 7;
+    const expiryStart = isCompactFormat ? 7 : 8;
+
+    const sex = validateSexOrBlank(raw2trim[sexPos]);
+    if (sex) data.sex = sex;
+    
+    const expiry = mrzYYMMDDToDisplay(fixN(raw2trim.slice(expiryStart, expiryStart + 6)), true);
+    if (expiry) data.expiry = expiry;
+  }
+
   // Parse Line 1: card_no & nin
   if (line1) {
     const cleanL1 = line1.replace(/^(ID|1D|IDTST|IDUGA)/, '');
@@ -545,7 +624,7 @@ function parseMRZ(text) {
     }
     
     const remainingStr = fixN(line1).replace(/</g, '');
-    const ninMatch = remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9]{9})([A-Z0-9]{3,8})/i);
+    const ninMatch = remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
     if (ninMatch) {
       let p1 = ninMatch[1].toUpperCase();
       const p2 = ninMatch[2];
@@ -557,7 +636,7 @@ function parseMRZ(text) {
       if (/[1NHK0OBH]/.test(p1[1])) p1 = p1[0] + 'M';
       else if (/[PRE35]/.test(p1[1])) p1 = p1[0] + 'F';
       
-      const candidateNin = normalizeNinCandidate(p1 + p2 + p3);
+      const candidateNin = normalizeNinCandidate(p1 + p2 + p3, mrzDob);
       if (candidateNin.length === 14) {
         data.nin = candidateNin;
       }
@@ -601,32 +680,6 @@ function parseMRZ(text) {
       if (giv) data.given_names = giv;
       data.nationality = 'UGA';
     }
-  }
-
-  // Parse Line 2: dob, sex, expiry
-  if (line2) {
-    const r2start = line2.search(/[0-9]/);
-    const raw2trim = r2start >= 0 ? line2.slice(r2start) : line2;
-    
-    const dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
-    if (dob) data.dob = dob;
-
-    const ugaIdx = raw2trim.search(/[UT][GS][AT]/);
-    let isCompactFormat = true;
-    if (ugaIdx >= 15) {
-      isCompactFormat = false;
-    } else if (ugaIdx < 0) {
-      isCompactFormat = !/[0-9]/.test(raw2trim[6] || '');
-    }
-    
-    const sexPos     = isCompactFormat ? 6 : 7;
-    const expiryStart = isCompactFormat ? 7 : 8;
-
-    const sex = validateSexOrBlank(raw2trim[sexPos]);
-    if (sex) data.sex = sex;
-    
-    const expiry = mrzYYMMDDToDisplay(fixN(raw2trim.slice(expiryStart, expiryStart + 6)), true);
-    if (expiry) data.expiry = expiry;
   }
 
   return data;
@@ -687,20 +740,43 @@ const FIELD_OCR_SETTINGS = {
 function reconcileName(frontName, mrzName) {
   if (!frontName) return mrzName || '';
   if (!mrzName) return frontName || '';
-  
-  const f = frontName.toUpperCase().replace(/[^A-Z]/g, '');
-  const m = mrzName.toUpperCase().replace(/[^A-Z]/g, '');
-  
-  if (f === m) return frontName;
-  
-  if (m.startsWith(f)) return frontName;
-  if (f.startsWith(m)) return frontName;
-  
-  if (m.endsWith(f)) return mrzName;
-  if (f.endsWith(m)) return frontName;
-  
-  if (m.length > f.length + 3) return frontName;
-  
+
+  const fClean = frontName.toUpperCase().replace(/[^A-Z]/g, '');
+  const mClean = mrzName.toUpperCase().replace(/[^A-Z]/g, '');
+
+  if (fClean === mClean) return frontName;
+
+  // 1. If one name contains the other as a substring (spaces removed), return the longer one
+  if (mClean.includes(fClean)) return mrzName;
+  if (fClean.includes(mClean)) return frontName;
+
+  const fToks = frontName.toUpperCase().split(/\s+/).filter(Boolean);
+  const mToks = mrzName.toUpperCase().split(/\s+/).filter(Boolean);
+
+  // 2. If same number of tokens, reconcile token-by-token (handles prefix/suffix cut-offs in individual words)
+  if (fToks.length === mToks.length) {
+    const reconciled = [];
+    for (let i = 0; i < fToks.length; i++) {
+      const ft = fToks[i];
+      const mt = mToks[i];
+      
+      if (ft === mt) {
+        reconciled.push(ft);
+      } else if (mt.startsWith(ft) || mt.endsWith(ft)) {
+        reconciled.push(mt);
+      } else if (ft.startsWith(mt) || ft.endsWith(mt)) {
+        reconciled.push(ft);
+      } else {
+        reconciled.push(ft); // default fallback
+      }
+    }
+    return reconciled.join(' ');
+  }
+
+  // 3. Fallback suffix/prefix check
+  if (mClean.startsWith(fClean) || mClean.endsWith(fClean)) return mrzName;
+  if (fClean.startsWith(mClean) || fClean.endsWith(mClean)) return frontName;
+
   return frontName;
 }
 
@@ -739,7 +815,7 @@ function mergeAndApplyMrzBackfill(merged) {
   out.dob         = reconcileDob(front.dob, mrz.dob);
   out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
   out.sex         = reconcileSex(front.sex, mrz.sex);
-  out.nin         = reconcileNins(front.nin, mrz.nin);
+  out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
   out.surname     = reconcileName(front.surname, mrz.surname);
   out.given_names = reconcileName(front.given_names, mrz.given_names);
   out.card_no     = front.card_no   || ''; // front only
@@ -796,9 +872,9 @@ function reconcileSex(frontSex, mrzSex) {
   return vFront || vMrz || frontSex || mrzSex || '';
 }
 
-function reconcileNins(frontNin, mrzNin) {
-  const vFront = validateNin(frontNin);
-  const vMrz   = validateNin(mrzNin);
+function reconcileNins(frontNin, mrzNin, dob) {
+  const vFront = validateNin(frontNin, dob);
+  const vMrz   = validateNin(mrzNin, dob);
   if (vFront && vMrz) {
     if (vFront === vMrz) return vFront;
     const chars = [];
@@ -829,9 +905,24 @@ function reconcileNins(frontNin, mrzNin) {
       }
     }
     const merged = chars.join('');
-    return validateNin(merged) || vFront;
+    return validateNin(merged, dob) || vFront;
   }
-  return vFront || vMrz || frontNin || mrzNin || '';
+  
+  const cleanFront = validateNin(frontNin, dob);
+  const cleanMrz   = validateNin(mrzNin, dob);
+  if (cleanFront) return cleanFront;
+  if (cleanMrz) return cleanMrz;
+  
+  if (frontNin) {
+    const cand = normalizeNinCandidate(frontNin, dob);
+    if (validateNin(cand, dob)) return cand;
+  }
+  if (mrzNin) {
+    const cand = normalizeNinCandidate(mrzNin, dob);
+    if (validateNin(cand, dob)) return cand;
+  }
+
+  return frontNin || mrzNin || '';
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────
