@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// Read the js/app.js file using absolute path
-const appJsPath = 'c:/Users/BEST/Downloads/Firebase/nssf-offline/nssf-id-capture/js/app.js';
-let code = fs.readFileSync(appJsPath, 'utf8');
+const parserJsPath = 'c:/Users/HP/Downloads/Firebase/nssf-offline/nssf-id-capture/js/parser.js';
+const appJsPath = 'c:/Users/HP/Downloads/Firebase/nssf-offline/nssf-id-capture/js/app.js';
+let code = fs.readFileSync(parserJsPath, 'utf8') + '\n' + fs.readFileSync(appJsPath, 'utf8');
 
 // Mock browser objects to prevent errors during evaluation
 const mockCode = `

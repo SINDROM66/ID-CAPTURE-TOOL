@@ -175,6 +175,49 @@ function validateNin(n, dob) {
   return NIN_REGEX.test(v) ? v : '';
 }
 
+function correctNIN(raw) {
+  // Remove all spaces, force uppercase
+  let s = (raw || '').replace(/\s/g, '').toUpperCase().substring(0, 14);
+  const chars = s.split('');
+
+  // Positions 0-1: must be letters — fix digit→letter confusions
+  for (let i = 0; i <= 1; i++) {
+    if (chars[i] === '0') chars[i] = 'O';
+    if (chars[i] === '1') chars[i] = 'I';
+    if (chars[i] === '8') chars[i] = 'B';
+    if (chars[i] === '5') chars[i] = 'S';
+  }
+
+  // Positions 2-10: must be digits — fix letter→digit confusions
+  for (let i = 2; i <= 10; i++) {
+    if (chars[i] === 'O') chars[i] = '0';
+    if (chars[i] === 'I') chars[i] = '1';
+    if (chars[i] === 'B') chars[i] = '8';
+    if (chars[i] === 'S') chars[i] = '5';
+    if (chars[i] === 'Z') chars[i] = '2';
+    if (chars[i] === 'G') chars[i] = '6';
+  }
+
+  // Positions 11-13: must be letters — same corrections as positions 0-1
+  for (let i = 11; i <= 13; i++) {
+    if (chars[i] === '0') chars[i] = 'O';
+    if (chars[i] === '1') chars[i] = 'I';
+    if (chars[i] === '8') chars[i] = 'B';
+    if (chars[i] === '5') chars[i] = 'S';
+  }
+
+  return chars.join('');
+}
+
+function correctDate(raw) {
+  // Strip everything except digits
+  const digits = (raw || '').replace(/[^0-9]/g, '');
+  if (digits.length >= 8) {
+    return digits.substring(0,2) + '.' + digits.substring(2,4) + '.' + digits.substring(4,8);
+  }
+  return (raw || '').trim();
+}
+
 function parseAndFormatDob(raw) {
   const clean = (raw || '').replace(/\s+/g, '').replace(/,/g, '.');
   let m = clean.match(/(\d{2})[.\/\-](\d{2})[.\/\-](\d{4})/);
@@ -687,22 +730,41 @@ function parseMRZ(text) {
   return data;
 }
 
+const ROI = {
+  FRONT: {
+    SURNAME:     { x: 259, y: 130, w: 326, h: 59  },
+    GIVEN_NAMES: { x: 259, y: 207, w: 418, h: 60  },
+    NATIONALITY: { x: 259, y: 276, w: 125, h: 52  },
+    SEX:         { x: 397, y: 276, w: 75,  h: 52  },
+    DOB:         { x: 543, y: 276, w: 259, h: 52  },
+    NIN:         { x: 259, y: 344, w: 334, h: 55  },
+    CARD_NO:     { x: 577, y: 344, w: 251, h: 55  },
+    EXPIRY:      { x: 259, y: 414, w: 222, h: 52  },
+  },
+  BACK: {
+    ADDRESS_BLOCK: { x: 102, y: 168, w: 465, h: 159 },
+    MRZ_LINE_1:    { x: 8,   y: 339, w: 738, h: 49  },
+    MRZ_LINE_2:    { x: 8,   y: 391, w: 738, h: 49  },
+    MRZ_LINE_3:    { x: 8,   y: 443, w: 738, h: 49  },
+  }
+};
+
 const FRONT_ROIS = {
-  surname:       { x: 0.3350, y: 0.3150, w: 0.1550, h: 0.0650 },
-  given_names:   { x: 0.3350, y: 0.4250, w: 0.2400, h: 0.0550 },
-  nationality:   { x: 0.3350, y: 0.5350, w: 0.0800, h: 0.0500 },
-  sex:           { x: 0.5100, y: 0.5350, w: 0.0350, h: 0.0500 },
-  dob:           { x: 0.6300, y: 0.5350, w: 0.1700, h: 0.0500 },
-  nin:           { x: 0.3350, y: 0.6300, w: 0.2450, h: 0.0500 },
-  card_no:       { x: 0.6300, y: 0.6400, w: 0.1750, h: 0.0450 },
-  expiry:        { x: 0.3350, y: 0.7500, w: 0.1550, h: 0.0500 }
+  surname:       ROI.FRONT.SURNAME,
+  given_names:   ROI.FRONT.GIVEN_NAMES,
+  nationality:   ROI.FRONT.NATIONALITY,
+  sex:           ROI.FRONT.SEX,
+  dob:           ROI.FRONT.DOB,
+  nin:           ROI.FRONT.NIN,
+  card_no:       ROI.FRONT.CARD_NO,
+  expiry:        ROI.FRONT.EXPIRY
 };
 
 const BACK_ROIS = {
-  address_block: { x: 0.02, y: 0.30, w: 0.50, h: 0.40 },
-  mrz_line1:     { x: 0.005, y: 0.72, w: 0.99, h: 0.09 },
-  mrz_line2:     { x: 0.005, y: 0.81, w: 0.99, h: 0.09 },
-  mrz_line3:     { x: 0.005, y: 0.90, w: 0.99, h: 0.095 }
+  address_block: ROI.BACK.ADDRESS_BLOCK,
+  mrz_line1:     ROI.BACK.MRZ_LINE_1,
+  mrz_line2:     ROI.BACK.MRZ_LINE_2,
+  mrz_line3:     ROI.BACK.MRZ_LINE_3
 };
 
 const SYNTHETIC_FRONT_ROIS = {
@@ -726,12 +788,12 @@ const SYNTHETIC_BACK_ROIS = {
 const FIELD_OCR_SETTINGS = {
   surname:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
   given_names:   { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
-  nationality:   { psm: '10', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' },
-  sex:           { psm: '10', whitelist: 'MF' },
-  dob:           { psm: '7', whitelist: '0123456789.' },
-  nin:           { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
-  expiry:        { psm: '7', whitelist: '0123456789.' },
-  card_no:       { psm: '7', whitelist: '0123456789' },
+  nationality:   { psm: '8', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' },
+  sex:           { psm: '8', whitelist: 'MF' },
+  dob:           { psm: '8', whitelist: '0123456789.' },
+  nin:           { psm: '8', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
+  expiry:        { psm: '8', whitelist: '0123456789.' },
+  card_no:       { psm: '8', whitelist: '0123456789' },
   mrz_line1:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
   mrz_line2:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
   mrz_line3:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
@@ -930,6 +992,7 @@ function reconcileNins(frontNin, mrzNin, dob) {
 // ─── Exports ──────────────────────────────────────────────────────────────
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    ROI,
     FRONT_ROIS,
     BACK_ROIS,
     SYNTHETIC_FRONT_ROIS,
@@ -952,10 +1015,13 @@ if (typeof module !== 'undefined' && module.exports) {
     reconcileDob,
     reconcileExpiry,
     reconcileSex,
-    reconcileNins
+    reconcileNins,
+    correctNIN,
+    correctDate
   };
 } else {
   // Browser global exposure
+  window.ROI = ROI;
   window.FRONT_ROIS = FRONT_ROIS;
   window.BACK_ROIS = BACK_ROIS;
   window.SYNTHETIC_FRONT_ROIS = SYNTHETIC_FRONT_ROIS;
@@ -979,4 +1045,6 @@ if (typeof module !== 'undefined' && module.exports) {
   window.reconcileExpiry = reconcileExpiry;
   window.reconcileSex = reconcileSex;
   window.reconcileNins = reconcileNins;
+  window.correctNIN = correctNIN;
+  window.correctDate = correctDate;
 }

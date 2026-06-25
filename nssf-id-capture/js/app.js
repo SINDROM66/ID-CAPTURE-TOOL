@@ -474,10 +474,16 @@ function cropROI(canvas, roi, fieldName) {
     padY = 3;
   }
 
-  const x = Math.max(0, Math.round(roi.x * canvas.width) - padX);
-  const y = Math.max(0, Math.round(roi.y * canvas.height) - padY);
-  const w = Math.min(canvas.width - x, Math.round(roi.w * canvas.width) + 2 * padX);
-  const h = Math.min(canvas.height - y, Math.round(roi.h * canvas.height) + 2 * padY);
+  const isAbsolute = roi.x > 1.0;
+  const rx = isAbsolute ? roi.x : roi.x * canvas.width;
+  const ry = isAbsolute ? roi.y : roi.y * canvas.height;
+  const rw = isAbsolute ? roi.w : roi.w * canvas.width;
+  const rh = isAbsolute ? roi.h : roi.h * canvas.height;
+
+  const x = Math.max(0, Math.round(rx) - padX);
+  const y = Math.max(0, Math.round(ry) - padY);
+  const w = Math.min(canvas.width - x, Math.round(rw) + 2 * padX);
+  const h = Math.min(canvas.height - y, Math.round(rh) + 2 * padY);
 
   const out = document.createElement('canvas');
   out.width = w;
@@ -725,7 +731,13 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
 
     const frontResults = await Promise.all(frontPromises);
     frontResults.forEach(r => {
-      roiFront[r.field] = r.text;
+      let val = r.text;
+      if (r.field === 'nin') {
+        val = correctNIN(val);
+      } else if (r.field === 'dob' || r.field === 'expiry') {
+        val = correctDate(val);
+      }
+      roiFront[r.field] = val;
     });
 
     frontData = {
@@ -748,60 +760,83 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
 
     setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
 
-    const roiAddr = backRois.address_block;
-    const padX = 15;
-    const padY = 10;
-    const ax = Math.max(0, Math.round(roiAddr.x * backCanvas.width) - padX);
-    const ay = Math.max(0, Math.round(roiAddr.y * backCanvas.height) - padY);
-    const aw = Math.min(backCanvas.width - ax, Math.round(roiAddr.w * backCanvas.width) + 2 * padX);
-    const ah = Math.min(backCanvas.height - ay, Math.round(roiAddr.h * backCanvas.height) + 2 * padY);
-    const croppedAddr = document.createElement('canvas');
-    croppedAddr.width = aw;
-    croppedAddr.height = ah;
-    croppedAddr.getContext('2d').drawImage(backCanvas, ax, ay, aw, ah, 0, 0, aw, ah);
+    const croppedAddr = cropROI(backCanvas, backRois.address_block, 'address_block');
     const preprocessedAddr = preprocessROI(croppedAddr, 2.0);
     const dataUrlAddr = preprocessedAddr.toDataURL('image/png');
 
-    const mx = 5;
-    const my = Math.round(0.70 * backCanvas.height);
-    const mw = backCanvas.width - 2 * mx;
-    const mh = backCanvas.height - my;
-    const croppedMrz = document.createElement('canvas');
-    croppedMrz.width = mw;
-    croppedMrz.height = mh;
-    croppedMrz.getContext('2d').drawImage(backCanvas, mx, my, mw, mh, 0, 0, mw, mh);
-    const preprocessedMrz = preprocessROI(croppedMrz, 2.0);
-    const dataUrlMrz = preprocessedMrz.toDataURL('image/png');
+    const croppedMrz1 = cropROI(backCanvas, backRois.mrz_line1, 'mrz_line1');
+    const preprocessedMrz1 = preprocessROI(croppedMrz1, 3.0);
+    const dataUrlMrz1 = preprocessedMrz1.toDataURL('image/png');
+
+    const croppedMrz2 = cropROI(backCanvas, backRois.mrz_line2, 'mrz_line2');
+    const preprocessedMrz2 = preprocessROI(croppedMrz2, 3.0);
+    const dataUrlMrz2 = preprocessedMrz2.toDataURL('image/png');
+
+    const croppedMrz3 = cropROI(backCanvas, backRois.mrz_line3, 'mrz_line3');
+    const preprocessedMrz3 = preprocessROI(croppedMrz3, 3.0);
+    const dataUrlMrz3 = preprocessedMrz3.toDataURL('image/png');
 
     const results = await Promise.all([
+      // Address block
       (async () => {
-        const worker0 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker0.setParameters({
+        const settings = FIELD_OCR_SETTINGS.address_block;
+        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker.setParameters({
           preserve_interword_spaces: '1',
           user_defined_dpi: '300',
-          tessedit_char_whitelist: '',
-          tessedit_pageseg_mode: '6'
+          tessedit_char_whitelist: settings.whitelist || '',
+          tessedit_pageseg_mode: settings.psm
         });
-        const res = await worker0.recognize(dataUrlAddr);
-        await worker0.terminate();
+        const res = await worker.recognize(dataUrlAddr);
+        await worker.terminate();
         return (res.data.text || '').trim();
       })(),
+      // MRZ Line 1
       (async () => {
-        const worker1 = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker1.setParameters({
+        const settings = FIELD_OCR_SETTINGS.mrz_line1;
+        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker.setParameters({
           preserve_interword_spaces: '1',
           user_defined_dpi: '300',
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
-          tessedit_pageseg_mode: '6'
+          tessedit_char_whitelist: settings.whitelist || '',
+          tessedit_pageseg_mode: settings.psm
         });
-        const res = await worker1.recognize(dataUrlMrz);
-        await worker1.terminate();
+        const res = await worker.recognize(dataUrlMrz1);
+        await worker.terminate();
+        return (res.data.text || '').trim();
+      })(),
+      // MRZ Line 2
+      (async () => {
+        const settings = FIELD_OCR_SETTINGS.mrz_line2;
+        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker.setParameters({
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_char_whitelist: settings.whitelist || '',
+          tessedit_pageseg_mode: settings.psm
+        });
+        const res = await worker.recognize(dataUrlMrz2);
+        await worker.terminate();
+        return (res.data.text || '').trim();
+      })(),
+      // MRZ Line 3
+      (async () => {
+        const settings = FIELD_OCR_SETTINGS.mrz_line3;
+        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+        await worker.setParameters({
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+          tessedit_char_whitelist: settings.whitelist || '',
+          tessedit_pageseg_mode: settings.psm
+        });
+        const res = await worker.recognize(dataUrlMrz3);
+        await worker.terminate();
         return (res.data.text || '').trim();
       })()
     ]);
 
     const addrText = results[0];
-    const mrzText  = results[1];
+    const mrzText  = [results[1], results[2], results[3]].join('\n');
 
     const backAddrData = parseBack(addrText);
     const backMrzData = parseMRZ(mrzText);
