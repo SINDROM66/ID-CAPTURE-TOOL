@@ -9,7 +9,8 @@
 const state = {
   files: { front: null, back: null },
   records: [],
-  ocr: { running: false }
+  ocr: { running: false },
+  installPrompt: null
 };
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
@@ -1448,6 +1449,42 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+function setupInstallAppButton() {
+  const btn = document.getElementById('btn-install-app');
+  if (!btn) return;
+
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches ||
+    window.navigator.standalone === true;
+
+  if (isStandalone) {
+    btn.style.display = 'none';
+    return;
+  }
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    state.installPrompt = event;
+    btn.style.display = 'inline-flex';
+  });
+
+  btn.addEventListener('click', async () => {
+    if (!state.installPrompt) {
+      window.alert('To install on iPhone/iPad, use Share then Add to Home Screen. On Android/Chrome, use the browser menu then Install app.');
+      return;
+    }
+
+    const promptEvent = state.installPrompt;
+    state.installPrompt = null;
+    btn.style.display = 'none';
+    await promptEvent.prompt();
+  });
+
+  window.addEventListener('appinstalled', () => {
+    state.installPrompt = null;
+    btn.style.display = 'none';
+  });
+}
+
 // ─── Photo Source Selector Modal ──────────────
 function showSourceSelector(side) {
   const modal = document.getElementById('source-selector-modal');
@@ -1481,5 +1518,5 @@ window.showSourceSelector = showSourceSelector;
 
 // ─── Init ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Empty init
+  setupInstallAppButton();
 });

@@ -1,7 +1,8 @@
-const CACHE_NAME = 'nssf-id-capture-v10';
+const CACHE_NAME = 'nssf-id-capture-v11';
 const ASSETS = [
   './',
   './index.html',
+  './manifest.webmanifest',
   './css/style.css',
   './js/app.js',
   './js/parser.js',
@@ -9,7 +10,10 @@ const ASSETS = [
   './js/tesseract.min.js',
   './js/opencv.js',
   './js/worker.min.js',
-  './assets/favicon.ico'
+  './assets/favicon.ico',
+  './assets/icon-192.png',
+  './assets/icon-512.png',
+  './assets/icon-maskable-512.png'
 ];
 
 self.addEventListener('install', (e) => {
