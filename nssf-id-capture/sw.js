@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nssf-id-capture-v5';
+const CACHE_NAME = 'nssf-id-capture-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -7,9 +7,9 @@ const ASSETS = [
   './js/parser.js',
   './js/xlsx.full.min.js',
   './js/tesseract.min.js',
+  './js/opencv.js',
   './js/worker.min.js',
-  './assets/favicon.ico',
-  'https://docs.opencv.org/4.8.0/opencv.js'
+  './assets/favicon.ico'
 ];
 
 self.addEventListener('install', (e) => {
