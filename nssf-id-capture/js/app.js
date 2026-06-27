@@ -225,12 +225,22 @@ function detectCardBoundaryWithOpenCv(img) {
   let cardContour = null;
   let bestBox = null;
   let bestScore = -Infinity;
-  const imgArea = src.cols * src.rows;
+  let detectSrc = src;
+  let detectionScale = 1;
+  if (Math.max(src.cols, src.rows) > 900) {
+    detectionScale = 900 / Math.max(src.cols, src.rows);
+    detectSrc = new cv.Mat();
+    cv.resize(src, detectSrc, new cv.Size(
+      Math.max(1, Math.round(src.cols * detectionScale)),
+      Math.max(1, Math.round(src.rows * detectionScale))
+    ), 0, 0, cv.INTER_AREA);
+  }
+  const imgArea = detectSrc.cols * detectSrc.rows;
 
-  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  cv.cvtColor(detectSrc, gray, cv.COLOR_RGBA2GRAY);
   cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
 
-  for (const [low, high] of [[35, 110], [50, 150], [75, 200], [100, 240]]) {
+  for (const [low, high] of [[30, 95], [60, 170], [100, 240]]) {
     contours.delete();
     hierarchy.delete();
     contours = new cv.MatVector();
@@ -255,9 +265,13 @@ function detectCardBoundaryWithOpenCv(img) {
       const rect = cv.minAreaRect(contour);
       const rw = rect.size.width;
       const rh = rect.size.height;
+      const rectArea = Math.max(1, rw * rh);
+      const rectangularity = Math.min(1, area / rectArea);
       const rectAspect = rw > rh ? rw / rh : rh / rw;
       if (rectAspect >= 1.18 && rectAspect <= 1.95) {
-        const rectScore = (areaRatio * 4.5) - Math.abs(rectAspect - 1.586) - 0.15;
+        const ratioScore = 1 - Math.min(1, Math.abs(rectAspect - 1.586) / 0.45);
+        const areaScore = Math.min(1, areaRatio / 0.22);
+        const rectScore = ratioScore * 3 + rectangularity * 2 + areaScore;
         if (rectScore > bestScore && !cardContour) {
           bestScore = rectScore;
           bestBox = rotatedRectToPoints(rect);
@@ -270,7 +284,9 @@ function detectCardBoundaryWithOpenCv(img) {
         const aspectRatio = w > h ? w / h : h / w;
 
         if (aspectRatio >= 1.18 && aspectRatio <= 1.95) {
-          const score = (areaRatio * 5) - Math.abs(aspectRatio - 1.586);
+          const ratioScore = 1 - Math.min(1, Math.abs(aspectRatio - 1.586) / 0.45);
+          const areaScore = Math.min(1, areaRatio / 0.22);
+          const score = ratioScore * 3 + rectangularity * 2.5 + areaScore + 0.35;
           if (score > bestScore) {
             bestScore = score;
             if (cardContour) cardContour.delete();
@@ -288,6 +304,65 @@ function detectCardBoundaryWithOpenCv(img) {
     }
   }
 
+  // Pale laminated cards often have weak outer edges against a white surface.
+  // Their printed security colors still form one saturated rectangular region,
+  // so evaluate several saturation masks as a second independent detector.
+  const rgb = new cv.Mat();
+  const hsv = new cv.Mat();
+  const channels = new cv.MatVector();
+  const colorMask = new cv.Mat();
+  const colorKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(13, 13));
+  cv.cvtColor(detectSrc, rgb, cv.COLOR_RGBA2RGB);
+  cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+  cv.split(hsv, channels);
+  const saturation = channels.get(1);
+
+  for (const threshold of [9, 16, 24, 36]) {
+    cv.threshold(saturation, colorMask, threshold, 255, cv.THRESH_BINARY);
+    cv.morphologyEx(colorMask, colorMask, cv.MORPH_CLOSE, colorKernel);
+    contours.delete();
+    hierarchy.delete();
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(colorMask, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const area = cv.contourArea(contour);
+      const areaRatio = area / imgArea;
+      if (areaRatio < 0.035 || areaRatio > 0.82) {
+        contour.delete();
+        continue;
+      }
+      const rect = cv.minAreaRect(contour);
+      const rw = rect.size.width;
+      const rh = rect.size.height;
+      const aspect = Math.max(rw, rh) / Math.max(1, Math.min(rw, rh));
+      const rectangularity = Math.min(1, area / Math.max(1, rw * rh));
+      if (aspect >= 1.18 && aspect <= 1.95 && rectangularity >= 0.52) {
+        const ratioScore = 1 - Math.min(1, Math.abs(aspect - 1.586) / 0.45);
+        const areaScore = Math.min(1, areaRatio / 0.22);
+        const score = ratioScore * 3 + rectangularity * 2 + areaScore;
+        if (score > bestScore) {
+          bestScore = score;
+          if (cardContour) {
+            cardContour.delete();
+            cardContour = null;
+          }
+          bestBox = rotatedRectToPoints(rect);
+        }
+      }
+      contour.delete();
+    }
+  }
+
+  rgb.delete();
+  hsv.delete();
+  saturation.delete();
+  channels.delete();
+  colorMask.delete();
+  colorKernel.delete();
+
   let points = null;
   if (cardContour) {
     points = [];
@@ -302,6 +377,14 @@ function detectCardBoundaryWithOpenCv(img) {
     points = bestBox;
   }
 
+  if (points && detectionScale !== 1) {
+    points = points.map(point => ({
+      x: point.x / detectionScale,
+      y: point.y / detectionScale
+    }));
+  }
+
+  if (detectSrc !== src) detectSrc.delete();
   src.delete();
   gray.delete();
   blurred.delete();
@@ -477,10 +560,6 @@ function detectCardByHorizontalBand(img) {
   ];
 }
 
-function detectCardBoundary(img) {
-  return detectCardBoundaryWithOpenCv(img) || detectCardByCanvasScan(img) || detectCardByHorizontalBand(img);
-}
-
 function polygonArea(points) {
   let sum = 0;
   for (let i = 0; i < points.length; i++) {
@@ -501,51 +580,42 @@ function scoreCardDetection(points, img) {
   const w = (distance2d(ordered[0], ordered[1]) + distance2d(ordered[3], ordered[2])) / 2;
   const h = (distance2d(ordered[0], ordered[3]) + distance2d(ordered[1], ordered[2])) / 2;
   const ratio = h > 0 ? w / h : 0;
-  const areaRatio = polygonArea(ordered) / ((img.naturalWidth || img.width) * (img.naturalHeight || img.height));
+  const imageW = img.naturalWidth || img.width;
+  const imageH = img.naturalHeight || img.height;
+  const areaRatio = polygonArea(ordered) / (imageW * imageH);
   const ratioScore = Math.max(0, 1 - Math.abs(ratio - 1.586) / 0.55);
-  const areaScore = areaRatio >= 0.12 && areaRatio <= 0.92 ? Math.min(1, areaRatio / 0.35) : 0;
-  const confidence = Math.max(0, Math.min(1, ratioScore * 0.6 + areaScore * 0.4));
+  const areaScore = areaRatio >= 0.035 && areaRatio <= 0.82 ? Math.min(1, areaRatio / 0.24) : 0;
+  const marginX = imageW * 0.012;
+  const marginY = imageH * 0.012;
+  const minX = Math.min(...ordered.map(p => p.x));
+  const maxX = Math.max(...ordered.map(p => p.x));
+  const minY = Math.min(...ordered.map(p => p.y));
+  const maxY = Math.max(...ordered.map(p => p.y));
+  const touchingEdges = [minX <= marginX, maxX >= imageW - marginX, minY <= marginY, maxY >= imageH - marginY]
+    .filter(Boolean).length;
+  const edgeScore = Math.max(0, 1 - touchingEdges * 0.34);
+  const confidence = Math.max(0, Math.min(1, ratioScore * 0.52 + areaScore * 0.20 + edgeScore * 0.28));
   const label = confidence >= 0.72 ? 'high' : confidence >= 0.46 ? 'medium' : 'low';
-  return { confidence, label, ratio, areaRatio };
-}
-
-function estimateCenteredCardCorners(img) {
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  if (!w || !h) return null;
-
-  const targetRatio = 1.586;
-  let cardW = w * 0.84;
-  let cardH = cardW / targetRatio;
-  if (cardH > h * 0.62) {
-    cardH = h * 0.62;
-    cardW = cardH * targetRatio;
-  }
-
-  const x = (w - cardW) / 2;
-  const y = (h - cardH) / 2;
-  return [
-    { x, y },
-    { x: x + cardW, y },
-    { x: x + cardW, y: y + cardH },
-    { x, y: y + cardH }
-  ];
+  return { confidence, label, ratio, areaRatio, touchingEdges };
 }
 
 function chooseAutomaticCorners(img) {
-  const detected = detectCardBoundary(img);
-  const detectedScore = scoreCardDetection(detected, img);
-  if (detected && detectedScore.confidence >= 0.35) {
-    return { corners: detected, score: detectedScore, source: 'detected' };
-  }
+  const candidates = [
+    { corners: detectCardBoundaryWithOpenCv(img), source: 'opencv', minimum: 0.58, priority: 0.08 },
+    { corners: detectCardByCanvasScan(img), source: 'color-scan', minimum: 0.72, priority: 0 },
+    { corners: detectCardByHorizontalBand(img), source: 'edge-band', minimum: 0.76, priority: -0.02 }
+  ].filter(candidate => candidate.corners);
 
-  const centered = estimateCenteredCardCorners(img);
-  const centeredScore = scoreCardDetection(centered, img);
-  if (centered && centeredScore.confidence >= 0.35) {
-    return { corners: centered, score: centeredScore, source: 'center-estimate' };
-  }
+  candidates.forEach(candidate => {
+    candidate.score = scoreCardDetection(candidate.corners, img);
+    candidate.rank = candidate.score.confidence + candidate.priority;
+  });
+  candidates.sort((a, b) => b.rank - a.rank);
+  const accepted = candidates.find(candidate => candidate.score.confidence >= candidate.minimum);
+  if (accepted) return accepted;
 
-  return { corners: detected || centered, score: detectedScore, source: 'none' };
+  const best = candidates[0];
+  return best || { corners: null, score: { confidence: 0, label: 'none' }, source: 'none' };
 }
 
 function analyzeCaptureQuality(canvas) {
@@ -679,7 +749,7 @@ function drawDebugCanvas(warpedCanvas) {
 function getWarpedCanvasOrFallback(img, side) {
   return new Promise((resolve, reject) => {
     const result = chooseAutomaticCorners(img);
-    if (result.corners && result.score.confidence >= 0.35) {
+    if (result.corners && result.score.confidence >= (result.minimum || 0.58)) {
       console.log(`Automatic ${side} card crop (${result.source}).`, result.score);
       try {
         const ordered = orderCorners(result.corners);
