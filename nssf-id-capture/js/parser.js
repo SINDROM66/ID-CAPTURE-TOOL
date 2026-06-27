@@ -823,6 +823,10 @@ function parseMRZ(text) {
 
   // Parse Line 3: Names
   if (line3) {
+    // Tesseract commonly reads the MRZ chevrons between names as alternating
+    // K/S/L/X characters. Restore that separator when a filler run occurs
+    // between two plausible name tokens (for example MUYUNGASKSKTIMOTHY).
+    line3 = line3.replace(/([AEIOU])([KSLX]{2,})(?=[A-Z]{3,})/g, '$1<<');
     const firstChevronIdx = line3.search(/<+/);
     let sRaw = '', gRaw = '';
     if (firstChevronIdx >= 0) {
@@ -1153,35 +1157,7 @@ function reconcileNins(frontNin, mrzNin, dob) {
   const vMrz   = validateNin(mrzNin, dob);
   if (vFront && vMrz) {
     if (vFront === vMrz) return vFront;
-    const chars = [];
-    for (let i = 0; i < 14; i++) {
-      const c1 = vFront[i];
-      const c2 = vMrz[i];
-      if (c1 === c2) {
-        chars.push(c1);
-        continue;
-      }
-      if (i < 2) {
-        if (/[CMF]/.test(c1) && !/[CMF]/.test(c2)) chars.push(c1);
-        else if (/[CMF]/.test(c2) && !/[CMF]/.test(c1)) chars.push(c2);
-        else chars.push(c1);
-      } else if (i >= 2 && i <= 10) {
-        const isD1 = /[0-9]/.test(c1);
-        const isD2 = /[0-9]/.test(c2);
-        if (isD1 && !isD2) chars.push(c1);
-        else if (isD2 && !isD1) chars.push(c2);
-        else chars.push(c1);
-      } else {
-        const specific = { 'Q': 2, 'J': 2, 'U': 2, 'K': 2, 'X': 2, 'Z': 2 };
-        const score1 = specific[c1] || 0;
-        const score2 = specific[c2] || 0;
-        if (score1 > score2) chars.push(c1);
-        else if (score2 > score1) chars.push(c2);
-        else chars.push(c1);
-      }
-    }
-    const merged = chars.join('');
-    return validateNin(merged, dob) || vMrz || vFront;
+    return vMrz;
   }
   
   const cleanFront = validateNin(frontNin, dob);

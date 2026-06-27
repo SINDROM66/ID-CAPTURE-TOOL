@@ -964,18 +964,42 @@ function darkRatioInRegion(canvas, x0, y0, w0, h0) {
   return dark / Math.max(1, total);
 }
 
+function ugandaFlagColorRatio(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const x = Math.round(canvas.width * 0.74);
+  const y = Math.round(canvas.height * 0.015);
+  const w = Math.min(canvas.width - x, Math.round(canvas.width * 0.25));
+  const h = Math.min(canvas.height - y, Math.round(canvas.height * 0.25));
+  const data = ctx.getImageData(x, y, w, h).data;
+  let flagColor = 0;
+  let total = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const spread = Math.max(r, g, b) - Math.min(r, g, b);
+    const red = r > 105 && r > g * 1.35 && r > b * 1.15;
+    const yellow = r > 105 && g > 70 && b < Math.min(r, g) * 0.72 && spread > 40;
+    if (red || yellow) flagColor++;
+    total++;
+  }
+  return flagColor / Math.max(1, total);
+}
+
 function classifyCardLayout(canvas, side) {
   if (detectIsSynthetic(canvas)) return side === 'front' ? 'synthetic-front' : 'synthetic-back';
   if (side === 'front') {
-    const nidBlock = darkRatioInRegion(canvas, 0.03, 0.73, 0.22, 0.24);
-    const rightFlagOrMap = darkRatioInRegion(canvas, 0.76, 0.06, 0.20, 0.22);
-    if (nidBlock > 0.16 || rightFlagOrMap > 0.12) return 'new-front';
+    // A red/yellow Uganda flag is unique to the new front. The old front has a
+    // purple Uganda silhouette in the same area, so darkness alone is unsafe.
+    if (ugandaFlagColorRatio(canvas) > 0.012) return 'new-front';
     return 'old-front';
   }
 
-  const qr = darkRatioInRegion(canvas, 0.82, 0.02, 0.15, 0.18);
-  const mrzBottom = darkRatioInRegion(canvas, 0.02, 0.76, 0.88, 0.20);
-  if (qr > 0.14 || mrzBottom > 0.16) return 'new-back';
+  // MRZ text and a dark code at the upper right exist on both generations.
+  // The new PDF417 block occupies the middle of the card; the old code sits
+  // much higher, leaving the middle mostly clear for the address block.
+  const middleBarcode = darkRatioInRegion(canvas, 0.04, 0.30, 0.92, 0.31);
+  if (middleBarcode > 0.17) return 'new-back';
   return 'old-back';
 }
 
