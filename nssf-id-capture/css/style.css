@@ -313,6 +313,22 @@ body {
   color: var(--primary);
 }
 
+.scan-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 12px 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.scan-option input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
 /* ─── Alerts ────────────────────────────────── */
 .alert {
   display: flex;

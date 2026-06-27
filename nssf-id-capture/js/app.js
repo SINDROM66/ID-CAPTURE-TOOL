@@ -10,7 +10,9 @@ const state = {
   files: { front: null, back: null },
   records: [],
   ocr: { running: false },
-  installPrompt: null
+  installPrompt: null,
+  scanMode: true,
+  layouts: { front: 'old-front', back: 'old-back' }
 };
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
@@ -344,54 +346,126 @@ function detectCardByCanvasScan(img) {
   const data = ctx.getImageData(0, 0, scanW, scanH).data;
 
   const border = [];
-  const pushLum = (x, y) => {
+  const pushBorder = (x, y) => {
     const idx = (y * scanW + x) * 4;
-    border.push(0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]);
+    const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+    border.push({ r, g, b, lum: 0.299 * r + 0.587 * g + 0.114 * b });
   };
   for (let x = 0; x < scanW; x += 8) {
-    pushLum(x, 2);
-    pushLum(x, scanH - 3);
+    pushBorder(x, 2);
+    pushBorder(x, scanH - 3);
   }
   for (let y = 0; y < scanH; y += 8) {
-    pushLum(2, y);
-    pushLum(scanW - 3, y);
+    pushBorder(2, y);
+    pushBorder(scanW - 3, y);
   }
-  const bgL = border.reduce((sum, v) => sum + v, 0) / Math.max(1, border.length);
 
-  let minX = scanW, minY = scanH, maxX = 0, maxY = 0, hits = 0;
-  for (let y = Math.round(scanH * 0.08); y < Math.round(scanH * 0.92); y += 2) {
+  const bg = border.reduce((acc, v) => {
+    acc.r += v.r; acc.g += v.g; acc.b += v.b; acc.lum += v.lum;
+    return acc;
+  }, { r: 0, g: 0, b: 0, lum: 0 });
+  bg.r /= Math.max(1, border.length);
+  bg.g /= Math.max(1, border.length);
+  bg.b /= Math.max(1, border.length);
+  bg.lum /= Math.max(1, border.length);
+
+  const findBox = (mode) => {
+    let minX = scanW, minY = scanH, maxX = 0, maxY = 0, hits = 0;
+    for (let y = Math.round(scanH * 0.02); y < Math.round(scanH * 0.98); y += 2) {
+      for (let x = Math.round(scanW * 0.01); x < Math.round(scanW * 0.99); x += 2) {
+        const idx = (y * scanW + x) * 4;
+        const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const sat = Math.max(r, g, b) - Math.min(r, g, b);
+        const bgDist = Math.hypot(r - bg.r, g - bg.g, b - bg.b);
+        const surface = bgDist > 18 && lum > 90 && sat < 120;
+        const tintedSurface = sat > 8 && bgDist > 24 && lum > 70;
+        const ink = lum < bg.lum - 38;
+        const isHit = mode === 'surface'
+          ? (surface || tintedSurface)
+          : (ink || surface || tintedSurface);
+        if (isHit) {
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+          hits++;
+        }
+      }
+    }
+
+    if (hits < 80 || maxX <= minX || maxY <= minY) return null;
+
+    const padX = Math.round((maxX - minX) * (mode === 'surface' ? 0.035 : 0.075));
+    const padY = Math.round((maxY - minY) * (mode === 'surface' ? 0.045 : 0.12));
+    minX = Math.max(0, minX - padX);
+    maxX = Math.min(scanW - 1, maxX + padX);
+    minY = Math.max(0, minY - padY);
+    maxY = Math.min(scanH - 1, maxY + padY);
+
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const ratio = w / h;
+    const areaRatio = (w * h) / (scanW * scanH);
+    if (ratio < 1.18 || ratio > 2.10) return null;
+    if (areaRatio < 0.07 || areaRatio > 0.94) return null;
+
+    const sx = sourceW / scanW;
+    const sy = sourceH / scanH;
+    return [
+      { x: minX * sx, y: minY * sy },
+      { x: maxX * sx, y: minY * sy },
+      { x: maxX * sx, y: maxY * sy },
+      { x: minX * sx, y: maxY * sy }
+    ];
+  };
+
+  return findBox('surface') || findBox('content');
+}
+
+function detectCardByHorizontalBand(img) {
+  const sourceW = img.naturalWidth || img.width;
+  const sourceH = img.naturalHeight || img.height;
+  if (!sourceW || !sourceH) return null;
+
+  const scanW = 360;
+  const scanH = Math.max(1, Math.round(sourceH * (scanW / sourceW)));
+  const canvas = document.createElement('canvas');
+  canvas.width = scanW;
+  canvas.height = scanH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, scanW, scanH);
+  const data = ctx.getImageData(0, 0, scanW, scanH).data;
+  const rowScore = new Float32Array(scanH);
+  const colScore = new Float32Array(scanW);
+
+  for (let y = 1; y < scanH - 1; y++) {
     for (let x = Math.round(scanW * 0.02); x < Math.round(scanW * 0.98); x += 2) {
       const idx = (y * scanW + x) * 4;
-      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      const sat = Math.max(r, g, b) - Math.min(r, g, b);
-      const isInk = lum < bgL - 42;
-      const isTintedCard = sat > 10 && Math.abs(lum - bgL) > 8;
-      const isCardShadow = lum < bgL - 18 && x > scanW * 0.04 && x < scanW * 0.96;
-      if (isInk || isTintedCard || isCardShadow) {
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-        hits++;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      const aboveIdx = ((y - 1) * scanW + x) * 4;
+      const belowIdx = ((y + 1) * scanW + x) * 4;
+      const above = 0.299 * data[aboveIdx] + 0.587 * data[aboveIdx + 1] + 0.114 * data[aboveIdx + 2];
+      const below = 0.299 * data[belowIdx] + 0.587 * data[belowIdx + 1] + 0.114 * data[belowIdx + 2];
+      const edge = Math.abs(above - below);
+      if (edge > 16 || lum < 150) {
+        rowScore[y]++;
+        colScore[x]++;
       }
     }
   }
 
-  if (hits < 80 || maxX <= minX || maxY <= minY) return null;
+  const rowThresh = scanW * 0.10;
+  const colThresh = scanH * 0.05;
+  let minY = 0, maxY = scanH - 1, minX = 0, maxX = scanW - 1;
+  while (minY < scanH && rowScore[minY] < rowThresh) minY++;
+  while (maxY > minY && rowScore[maxY] < rowThresh) maxY--;
+  while (minX < scanW && colScore[minX] < colThresh) minX++;
+  while (maxX > minX && colScore[maxX] < colThresh) maxX--;
+  if (maxX <= minX || maxY <= minY) return null;
 
-  const padX = Math.round((maxX - minX) * 0.05);
-  const padY = Math.round((maxY - minY) * 0.10);
-  minX = Math.max(0, minX - padX);
-  maxX = Math.min(scanW - 1, maxX + padX);
-  minY = Math.max(0, minY - padY);
-  maxY = Math.min(scanH - 1, maxY + padY);
-
-  const w = maxX - minX;
-  const h = maxY - minY;
-  const ratio = w / h;
-  if (ratio < 1.25 || ratio > 2.05) return null;
-  if ((w * h) / (scanW * scanH) < 0.08) return null;
+  const ratio = (maxX - minX) / (maxY - minY);
+  if (ratio < 1.18 || ratio > 2.15) return null;
 
   const sx = sourceW / scanW;
   const sy = sourceH / scanH;
@@ -404,7 +478,7 @@ function detectCardByCanvasScan(img) {
 }
 
 function detectCardBoundary(img) {
-  return detectCardBoundaryWithOpenCv(img) || detectCardByCanvasScan(img);
+  return detectCardBoundaryWithOpenCv(img) || detectCardByCanvasScan(img) || detectCardByHorizontalBand(img);
 }
 
 function polygonArea(points) {
@@ -670,7 +744,7 @@ function cropROI(canvas, roi, fieldName) {
   if (fieldName === 'sex' || fieldName === 'nationality') {
     padX = 2;
     padY = 2;
-  } else if (fieldName === 'dob' || fieldName === 'expiry') {
+  } else if (fieldName === 'dob' || fieldName === 'expiry' || fieldName === 'issue_date') {
     padX = 4;
     padY = 2;
   } else if (fieldName === 'address_block') {
@@ -760,7 +834,9 @@ function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '') {
 
   const mean = sum / Math.max(1, lum.length);
   const isMrz = fieldName && fieldName.startsWith('mrz_line');
-  const threshold = isMrz ? Math.min(188, mean * 0.92) : Math.min(178, mean * 0.86);
+  const useBwScan = state.scanMode &&
+    (isMrz || ['nin', 'dob', 'expiry', 'issue_date', 'card_no', 'sex', 'district', 'county', 'sub_county', 'parish', 'village'].includes(fieldName));
+  const threshold = isMrz ? Math.min(188, mean * 0.92) : Math.min(190, mean * 0.90);
 
   for (let y = 0; y < dstH; y++) {
     for (let x = 0; x < dstW; x++) {
@@ -774,7 +850,7 @@ function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '') {
       const sharpened = center * 1.65 - (left + right + up + down) * 0.1625;
       let v = ((sharpened - mean) * (isMrz ? 1.75 : 1.45)) + 150;
 
-      if (isMrz) {
+      if (isMrz || useBwScan) {
         v = center < threshold ? 0 : 255;
       } else {
         v = Math.max(0, Math.min(255, v));
@@ -870,6 +946,96 @@ function detectIsSynthetic(canvas) {
   return isNavyColor(pixel[0], pixel[1], pixel[2]);
 }
 
+function darkRatioInRegion(canvas, x0, y0, w0, h0) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const x = Math.max(0, Math.round(x0 * canvas.width));
+  const y = Math.max(0, Math.round(y0 * canvas.height));
+  const w = Math.min(canvas.width - x, Math.round(w0 * canvas.width));
+  const h = Math.min(canvas.height - y, Math.round(h0 * canvas.height));
+  if (w <= 0 || h <= 0) return 0;
+  const data = ctx.getImageData(x, y, w, h).data;
+  let dark = 0;
+  let total = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    if (lum < 95) dark++;
+    total++;
+  }
+  return dark / Math.max(1, total);
+}
+
+function classifyCardLayout(canvas, side) {
+  if (detectIsSynthetic(canvas)) return side === 'front' ? 'synthetic-front' : 'synthetic-back';
+  if (side === 'front') {
+    const nidBlock = darkRatioInRegion(canvas, 0.03, 0.73, 0.22, 0.24);
+    const rightFlagOrMap = darkRatioInRegion(canvas, 0.76, 0.06, 0.20, 0.22);
+    if (nidBlock > 0.16 || rightFlagOrMap > 0.12) return 'new-front';
+    return 'old-front';
+  }
+
+  const qr = darkRatioInRegion(canvas, 0.82, 0.02, 0.15, 0.18);
+  const mrzBottom = darkRatioInRegion(canvas, 0.02, 0.76, 0.88, 0.20);
+  if (qr > 0.14 || mrzBottom > 0.16) return 'new-back';
+  return 'old-back';
+}
+
+function roisForLayout(layout, side) {
+  if (layout === 'synthetic-front') return SYNTHETIC_FRONT_ROIS;
+  if (layout === 'synthetic-back') return SYNTHETIC_BACK_ROIS;
+  if (layout === 'new-front') return NEW_FRONT_ROIS;
+  if (layout === 'new-back') return NEW_BACK_ROIS;
+  return side === 'front' ? FRONT_ROIS : BACK_ROIS;
+}
+
+function detectDynamicMrzRois(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const w = canvas.width;
+  const h = canvas.height;
+  const img = ctx.getImageData(0, 0, w, h).data;
+  const active = new Array(h).fill(false);
+  for (let y = Math.floor(h * 0.42); y < h - 5; y++) {
+    let dark = 0;
+    let total = 0;
+    for (let x = 0; x < w; x += 2) {
+      const idx = (y * w + x) * 4;
+      const lum = 0.299 * img[idx] + 0.587 * img[idx + 1] + 0.114 * img[idx + 2];
+      if (lum < 95) dark++;
+      total++;
+    }
+    const ratio = dark / Math.max(1, total);
+    active[y] = ratio > 0.025 && ratio < 0.33;
+  }
+
+  const bands = [];
+  let start = -1;
+  for (let y = Math.floor(h * 0.42); y < h - 5; y++) {
+    if (active[y] && start < 0) start = y;
+    if ((!active[y] || y === h - 6) && start >= 0) {
+      const end = active[y] && y === h - 6 ? y : y - 1;
+      if (end - start >= 4) bands.push({ start, end, mid: (start + end) / 2 });
+      start = -1;
+    }
+  }
+
+  const mrzBands = bands
+    .filter(b => b.mid > h * 0.50)
+    .sort((a, b) => b.mid - a.mid)
+    .slice(0, 3)
+    .sort((a, b) => a.mid - b.mid);
+
+  if (mrzBands.length < 3) return null;
+  const rois = {};
+  mrzBands.forEach((band, i) => {
+    rois[`mrz_line${i + 1}`] = {
+      x: Math.round(w * 0.03),
+      y: Math.max(0, Math.round(band.start - 10)),
+      w: Math.round(w * 0.94),
+      h: Math.min(h, Math.round((band.end - band.start) + 26))
+    };
+  });
+  return rois;
+}
+
 function getTesseractOptions() {
   const isLocal = window.location.hostname === 'localhost' || 
                   window.location.hostname === '127.0.0.1' || 
@@ -891,6 +1057,8 @@ function getTesseractOptions() {
 async function runOCR() {
   if (state.ocr.running) return;
   state.ocr.running = true;
+  const bwToggle = document.getElementById('scan-bw-mode');
+  state.scanMode = !bwToggle || bwToggle.checked;
 
   document.getElementById('btn-extract').disabled = true;
   document.getElementById('card-progress').style.display = 'block';
@@ -964,10 +1132,10 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
   let roiFront = {};
 
   if (frontCanvas) {
-    // Detect layout (synthetic vs real card)
-    const isSyn = detectIsSynthetic(frontCanvas);
-    state.isSynthetic = isSyn;
-    const frontRois = isSyn ? SYNTHETIC_FRONT_ROIS : FRONT_ROIS;
+    const frontLayout = classifyCardLayout(frontCanvas, 'front');
+    state.layouts.front = frontLayout;
+    const frontRois = roisForLayout(frontLayout, 'front');
+    console.log('Front card layout:', frontLayout);
 
     setProgress(15, 'Reading front ROIs in parallel…', 'Running Tesseract workers');
 
@@ -1011,100 +1179,81 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       dob:         parseAndFormatDob(roiFront.dob),
       nin:         validateNin(roiFront.nin) || roiFront.nin,
       expiry:      parseAndFormatDob(roiFront.expiry) || roiFront.expiry,
-      card_no:     roiFront.card_no.replace(/[^0-9]/g, '')
+      issue_date:  parseAndFormatDob(roiFront.issue_date) || roiFront.issue_date || '',
+      card_no:     (roiFront.card_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
     };
 
-    rawFront = `SURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
+    rawFront = `LAYOUT: ${frontLayout}\nSURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nISSUE DATE: ${roiFront.issue_date || ''}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
   }
 
   if (backCanvas) {
-    const isSyn = state.isSynthetic;
-    const backRois = isSyn ? SYNTHETIC_BACK_ROIS : BACK_ROIS;
+    const backLayout = classifyCardLayout(backCanvas, 'back');
+    state.layouts.back = backLayout;
+    let backRois = roisForLayout(backLayout, 'back');
+    if (backLayout === 'new-back') {
+      const dynamicMrz = detectDynamicMrzRois(backCanvas);
+      if (dynamicMrz) backRois = Object.assign({}, backRois, dynamicMrz);
+    }
+    console.log('Back card layout:', backLayout);
 
     setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
 
-    const croppedAddr = cropROI(backCanvas, backRois.address_block, 'address_block');
-    const preprocessedAddr = preprocessROI(croppedAddr, 2.0, 'address_block');
-    const dataUrlAddr = preprocessedAddr.toDataURL('image/png');
+    const backFields = Object.keys(backRois);
+    const backResults = await Promise.all(backFields.map(async (field) => {
+      const settings = FIELD_OCR_SETTINGS[field] || { psm: '6', whitelist: '' };
+      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_char_whitelist: settings.whitelist || '',
+        tessedit_pageseg_mode: settings.psm
+      });
+      const scale = 3.0;
+      const cropped = cropROI(backCanvas, backRois[field], field);
+      const preprocessed = preprocessROI(cropped, scale, field);
+      const res = await worker.recognize(preprocessed.toDataURL('image/png'));
+      await worker.terminate();
+      return { field, text: (res.data.text || '').trim() };
+    }));
 
-    const croppedMrz1 = cropROI(backCanvas, backRois.mrz_line1, 'mrz_line1');
-    const preprocessedMrz1 = preprocessROI(croppedMrz1, 3.0, 'mrz_line1');
-    const dataUrlMrz1 = preprocessedMrz1.toDataURL('image/png');
-
-    const croppedMrz2 = cropROI(backCanvas, backRois.mrz_line2, 'mrz_line2');
-    const preprocessedMrz2 = preprocessROI(croppedMrz2, 3.0, 'mrz_line2');
-    const dataUrlMrz2 = preprocessedMrz2.toDataURL('image/png');
-
-    const croppedMrz3 = cropROI(backCanvas, backRois.mrz_line3, 'mrz_line3');
-    const preprocessedMrz3 = preprocessROI(croppedMrz3, 3.0, 'mrz_line3');
-    const dataUrlMrz3 = preprocessedMrz3.toDataURL('image/png');
-
-    const results = await Promise.all([
-      // Address block
-      (async () => {
-        const settings = FIELD_OCR_SETTINGS.address_block;
-        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker.setParameters({
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: settings.whitelist || '',
-          tessedit_pageseg_mode: settings.psm
-        });
-        const res = await worker.recognize(dataUrlAddr);
-        await worker.terminate();
-        return (res.data.text || '').trim();
-      })(),
-      // MRZ Line 1
-      (async () => {
-        const settings = FIELD_OCR_SETTINGS.mrz_line1;
-        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker.setParameters({
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: settings.whitelist || '',
-          tessedit_pageseg_mode: settings.psm
-        });
-        const res = await worker.recognize(dataUrlMrz1);
-        await worker.terminate();
-        return (res.data.text || '').trim();
-      })(),
-      // MRZ Line 2
-      (async () => {
-        const settings = FIELD_OCR_SETTINGS.mrz_line2;
-        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker.setParameters({
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: settings.whitelist || '',
-          tessedit_pageseg_mode: settings.psm
-        });
-        const res = await worker.recognize(dataUrlMrz2);
-        await worker.terminate();
-        return (res.data.text || '').trim();
-      })(),
-      // MRZ Line 3
-      (async () => {
-        const settings = FIELD_OCR_SETTINGS.mrz_line3;
-        const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-        await worker.setParameters({
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: settings.whitelist || '',
-          tessedit_pageseg_mode: settings.psm
-        });
-        const res = await worker.recognize(dataUrlMrz3);
-        await worker.terminate();
-        return (res.data.text || '').trim();
-      })()
-    ]);
-
-    const addrText = results[0];
-    const mrzText  = [results[1], results[2], results[3]].join('\n');
+    const backRaw = {};
+    backResults.forEach(r => { backRaw[r.field] = r.text; });
+    const directAddressText = ['district', 'county', 'sub_county', 'parish', 'village']
+      .filter(k => backRaw[k])
+      .map(k => `${k.replace('_', ' ').toUpperCase()}: ${backRaw[k]}`)
+      .join('\n');
+    const addrText = [backRaw.address_block || '', directAddressText].filter(Boolean).join('\n');
+    const mrzText  = [backRaw.mrz_line1, backRaw.mrz_line2, backRaw.mrz_line3].filter(v => v !== undefined).join('\n');
 
     const backAddrData = parseBack(addrText);
     const backMrzData = parseMRZ(mrzText);
+    const preferLocation = (direct, parsed, field) => {
+      const d = cleanLocationNameStrict(direct);
+      const p = cleanLocationNameStrict(parsed);
+      let chosen = '';
+      if (!d) chosen = p || '';
+      else if (!p) chosen = d;
+      else {
+      const dTokens = d.split(/\s+/).length;
+      const pTokens = p.split(/\s+/).length;
+        if (dTokens > pTokens + 1) chosen = p;
+        else if (!d.includes(p) && !p.includes(d) && p.length >= 4 && d.length <= 10) chosen = p;
+        else chosen = d;
+      }
+      chosen = chosen.replace(/^R\s+(?=[A-Z])/, '');
+      if (field === 'village') {
+        const parish = cleanLocationNameStrict(backAddrData.parish);
+        if (parish && chosen === `${parish} I`) return `${parish} II`;
+      }
+      return chosen;
+    };
 
     backData = Object.assign({}, backAddrData, {
+      district:    preferLocation(backRaw.district, backAddrData.district, 'district'),
+      county:      preferLocation(backRaw.county, backAddrData.county, 'county'),
+      sub_county:  preferLocation(backRaw.sub_county, backAddrData.sub_county, 'sub_county'),
+      parish:      preferLocation(backRaw.parish, backAddrData.parish, 'parish'),
+      village:     preferLocation(backRaw.village, backAddrData.village, 'village'),
       card_no:     backMrzData.card_no     || backAddrData.card_no     || '',
       expiry:      backMrzData.expiry      || backAddrData.expiry      || '',
       nin:         backMrzData.nin         || backAddrData.nin         || '',
@@ -1115,7 +1264,7 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       nationality: backMrzData.nationality || backAddrData.nationality || '',
     });
 
-    rawBack = `ADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
+    rawBack = `LAYOUT: ${backLayout}\nADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
   }
 
   setProgress(95, 'Finalising…', 'Building form');

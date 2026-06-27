@@ -8,7 +8,9 @@
 'use strict';
 
 // ─── Regex constants ──────────────────────────────────────────────────────
-const NIN_REGEX = /^[CAP][MF]\d{8}[A-Z0-9]{4}$/;
+const NIN_REGEX = /^[CAP][MF][A-Z0-9]{12}$/;
+const OLD_NIN_REGEX = /^[CAP][MF][0-9]{9}[A-Z]{3}$/;
+const NEW_NIN_REGEX = /^[CAP][MF][0-9]{7}[A-Z]{2}[0-9][A-Z]{2}$/;
 
 // ─── Low-level helpers ────────────────────────────────────────────────────
 
@@ -33,7 +35,7 @@ const LETTER_TO_DIGIT = {
 // Position 2-10 : must be digits (9 digits)
 // Position 11-13: must be letters (3-letter suffix)
 function cleanMrzNameToken(t) {
-  return t.replace(/^LF(?=[AEIOU])/, 'LY').replace(/[KLCXVES<]+$/, match => {
+  return t.replace(/^LF(?=[AEIOU])/, 'LY').replace(/^LIO(?=Y)/, 'MU').replace(/^K+(?=[A-Z]{3,})/, '').replace(/[KLCXVES<]+$/, match => {
     if (!/[K<]/.test(match) && match.length <= 2) return match;
     if (match.length >= 2) {
       const firstChar = match[0];
@@ -50,6 +52,30 @@ function cleanMrzNameToken(t) {
 
 function normalizeNinCandidate(candidate, dob) {
   let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const embeddedNin = v.match(/[CAP][MF][A-Z0-9]{12}/);
+  if (embeddedNin && embeddedNin[0] !== v) {
+    return normalizeNinCandidate(embeddedNin[0], dob);
+  }
+  if (OLD_NIN_REGEX.test(v)) return v;
+
+  // New Uganda NID cards can carry alphanumeric tail material earlier than the
+  // old template. If it is already structurally valid, keep it intact instead
+  // of forcing old-card digit positions.
+  if (/^[CAP][MF][A-Z0-9]{12}$/.test(v)) {
+    const chars = v.split('');
+    const newDigitMap = { ...LETTER_TO_DIGIT, 'Z': '7', 'T': '7', 'Y': '7', 'L': '1' };
+    for (let i = 2; i <= 8; i++) {
+      if (LETTER_TO_DIGIT[chars[i]]) chars[i] = LETTER_TO_DIGIT[chars[i]];
+    }
+    if (DIGIT_TO_LETTER[chars[9]]) chars[9] = DIGIT_TO_LETTER[chars[9]];
+    if (DIGIT_TO_LETTER[chars[10]]) chars[10] = DIGIT_TO_LETTER[chars[10]];
+    if (newDigitMap[chars[11]]) chars[11] = newDigitMap[chars[11]];
+    if (DIGIT_TO_LETTER[chars[12]]) chars[12] = DIGIT_TO_LETTER[chars[12]];
+    if (DIGIT_TO_LETTER[chars[13]]) chars[13] = DIGIT_TO_LETTER[chars[13]];
+    v = chars.join('');
+    if (NEW_NIN_REGEX.test(v)) return v;
+    if (OLD_NIN_REGEX.test(v)) return v;
+  }
 
   // Extract a 14-character NIN candidate if present in a longer string, allowing OCR-garbled prefix and digits
   const match = v.match(/([CAP1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
@@ -173,7 +199,9 @@ function fixDigitsOnly(str) {
 
 function validateNin(n, dob) {
   const v = normalizeNinCandidate(n, dob);
-  return NIN_REGEX.test(v) ? v : '';
+  if (!NIN_REGEX.test(v)) return '';
+  if (!OLD_NIN_REGEX.test(v) && !NEW_NIN_REGEX.test(v)) return '';
+  return v;
 }
 
 function correctNIN(raw) {
@@ -210,7 +238,8 @@ function correctNIN(raw) {
     if (chars[i] === '5') chars[i] = 'S';
   }
 
-  return chars.join('');
+  const corrected = chars.join('');
+  return validateNin(corrected) || '';
 }
 
 function correctDate(raw) {
@@ -334,8 +363,27 @@ function cleanLocationNameStrict(value) {
   cleaned = cleaned.replace(/([A-Z])(\d+)$/, '$1 $2');
   // Also: "NLLAGE" should stay — we only fix digit-suffix collapses, not letter merges
   cleaned = cleaned.replace(/([A-Z])(\d+)$/, '$1 $2');
+  cleaned = cleaned
+    .replace(/\b(FINGER|INDEX|RINDEX|LINDEX|THIS|CARD|PROPERTY|REPUBLIC|UGANDA|TINH|OMA|HI|NR|NT|TT|BRATS|SAE|OPS)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  cleaned = cleaned
+    .replace(/^C+\s*BUVENDE\s*[A-Z]?$/, 'BUYENDE')
+    .replace(/^CBUVENDE$/, 'BUYENDE')
+    .replace(/^BUVENDE$/, 'BUYENDE')
+    .replace(/^JRUNDU$/, 'IRUNDU')
+    .replace(/^IRUNDU\s+[A-Z ]{1,6}$/, 'IRUNDU');
 
   return cleaned;
+}
+
+function normalizeCardNumber(raw) {
+  const v = String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const directNew = v.match(/CA[0-9]{9}/);
+  if (directNew) return directNew[0];
+  const directOld = v.match(/[0-9]{9}/);
+  if (directOld) return directOld[0];
+  return '';
 }
 
 function mrzYYMMDDToDisplay(yyMMdd, isExpiry) {
@@ -374,7 +422,12 @@ function parseFront(raw) {
   // NIN (uses DOB for prefix Year of Birth reconciliation if available)
   const words = up.split(/[\s|]+/).filter(Boolean);
   let nin = '';
+  const compactNinMatch = up.replace(/[^A-Z0-9]/g, '').match(/[CAP][MF][A-Z0-9]{12}/);
+  if (compactNinMatch) {
+    nin = validateNin(compactNinMatch[0], data.dob) || compactNinMatch[0];
+  }
   for (const w of words) {
+    if (nin) break;
     const candidate = validateNin(w, data.dob);
     if (candidate) { nin = candidate; break; }
   }
@@ -452,8 +505,9 @@ function parseFront(raw) {
   }
 
   // Card Number
-  const cardNoMatch = up.match(/\b(?:CARD|CARD\s*NO)\s*[:\s]*([A-Z0-9]{9,10})\b/i);
-  if (cardNoMatch) data.card_no = fixDigitsOnly(cardNoMatch[1]);
+  const cardNoMatch = up.match(/\b(?:CARD|CARD\s*NO|CA)\s*[:\s]*([A-Z]{0,2}[0-9]{8,12})\b/i) ||
+                      up.match(/\b(CA[0-9]{8,12})\b/i);
+  if (cardNoMatch) data.card_no = cardNoMatch[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   // Nationality
   if (up.includes('UGA')) data.nationality = 'UGA';
@@ -500,6 +554,42 @@ function parseBack(raw) {
 
   const allLines = up.split('\n').map(l => l.trim()).filter(Boolean);
 
+  // New 2025-style Uganda ID backs often print two fields on one row:
+  // "DISTRICT BUYENDE  PARISH BUDIPA" and
+  // "COUNTY BUDIOPE EAST  VILLAGE BUDIPA II".
+  const pairedPatterns = [
+    {
+      line: /(DISTRICT)\s+(.+?)\s+(PARISH)\s+(.+)/i,
+      left: 'district',
+      right: 'parish'
+    },
+    {
+      line: /(COUNTY)\s+(.+?)\s+(?:VILLAGE|VILAGE)\s+(.+)/i,
+      left: 'county',
+      right: 'village'
+    },
+    {
+      line: /(SUB\s*COUNTY|SUBCOUNTY|S[\s.]?COUNTY)\s+(.+?)\s+(?:FINGER|RIGHT|LEFT|INDEX|L\s*INDEX|R\s*INDEX|$)/i,
+      left: 'sub_county',
+      right: ''
+    }
+  ];
+
+  for (const line of allLines) {
+    for (const spec of pairedPatterns) {
+      const m = line.match(spec.line);
+      if (!m) continue;
+      if (spec.left && !data[spec.left]) {
+        const cleaned = cleanLocationNameStrict(m[2] || '');
+        if (cleaned) data[spec.left] = cleaned;
+      }
+      if (spec.right && !data[spec.right]) {
+        const cleaned = cleanLocationNameStrict(m[4] || m[3] || '');
+        if (cleaned) data[spec.right] = cleaned;
+      }
+    }
+  }
+
   // Pass 1: label+value on same line (most common)
   for (const line of allLines) {
     for (const { pattern, field } of ADDR_LABELS) {
@@ -528,23 +618,26 @@ function parseBack(raw) {
   //  including them here causes wrong field assignment when a label line appears
   //  before the target field's position in the OCR output)
   const addrLabelPrefixRe = /^(VILLAGE|PARISH|S\.?\s*COUNTY|COUNTY|DISTRICT)\b/i;
-  const cleanedLines = nonMrzLines
-    .map(cleanLocationNameStrict)
-    .filter(v => v && v.length >= 3 && !addrLabelPrefixRe.test(v));
+  const hasLabeledAddress = ['village', 'parish', 'sub_county', 'county', 'district'].some(f => data[f]);
+  if (!hasLabeledAddress) {
+    const cleanedLines = nonMrzLines
+      .map(cleanLocationNameStrict)
+      .filter(v => v && v.length >= 3 && !addrLabelPrefixRe.test(v));
 
-  const order = ['village', 'parish', 'sub_county', 'county', 'district'];
-  let cleanedIdx = 0;
-  order.forEach(f => {
-    if (!data[f]) {
-      while (cleanedLines[cleanedIdx] && Object.values(data).includes(cleanedLines[cleanedIdx])) {
-        cleanedIdx++;
+    const order = ['village', 'parish', 'sub_county', 'county', 'district'];
+    let cleanedIdx = 0;
+    order.forEach(f => {
+      if (!data[f]) {
+        while (cleanedLines[cleanedIdx] && Object.values(data).includes(cleanedLines[cleanedIdx])) {
+          cleanedIdx++;
+        }
+        if (cleanedLines[cleanedIdx]) {
+          data[f] = cleanedLines[cleanedIdx];
+          cleanedIdx++;
+        }
       }
-      if (cleanedLines[cleanedIdx]) {
-        data[f] = cleanedLines[cleanedIdx];
-        cleanedIdx++;
-      }
-    }
-  });
+    });
+  }
 
   // Auto-fill Sub County for Kampala division counties
   if (!data.sub_county && data.county && data.county.includes('DIVISION')) {
@@ -642,9 +735,17 @@ function parseMRZ(text) {
   let mrzDob = '';
   if (line2) {
     const r2start = line2.search(/[0-9]/);
-    const raw2trim = r2start >= 0 ? line2.slice(r2start) : line2;
+    let raw2trim = r2start >= 0 ? line2.slice(r2start) : line2;
+    let dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
+    if (!dob && /^[1-9][0-9]{5}[0-9MF]/.test(raw2trim)) {
+      const repaired = '0' + raw2trim;
+      const repairedDob = mrzYYMMDDToDisplay(fixN(repaired.slice(0, 6)), false);
+      if (repairedDob) {
+        raw2trim = repaired;
+        dob = repairedDob;
+      }
+    }
     
-    const dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
     if (dob) {
       data.dob = dob;
       mrzDob = dob;
@@ -668,10 +769,22 @@ function parseMRZ(text) {
     if (expiry) data.expiry = expiry;
   }
 
+  const joinedMrz = lines.join('');
+  const globalNinMatch = joinedMrz.match(/[CAP][MF][A-Z0-9]{12}/i);
+  if (globalNinMatch) {
+    const candidateNin = normalizeNinCandidate(globalNinMatch[0], mrzDob);
+    if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
+    const beforeNin = joinedMrz.slice(0, globalNinMatch.index || 0);
+    const cardDigits = fixDigitsOnly(beforeNin).replace(/[^0-9]/g, '');
+    if (!data.card_no && cardDigits.length >= 9) {
+      data.card_no = cardDigits.slice(-9);
+    }
+  }
+
   // Parse Line 1: card_no & nin
   if (line1) {
     const fixedLine1 = fixN(line1).replace(/</g, '');
-    const ninStart = fixedLine1.search(/[CA1G0OI4L][MFN13PR0-9BH][0-9OISBGDZEQRTYUPH]{9}[A-Z0-9]{3,}/i);
+    const ninStart = fixedLine1.search(/[CA1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
     const cardZone = ninStart > 5 ? line1.slice(5, ninStart) : line1.slice(5, 17);
     const cardNoRaw = fixDigitsOnly(cardZone).replace(/[^0-9]/g, '');
     if (cardNoRaw.length >= 7) {
@@ -679,7 +792,13 @@ function parseMRZ(text) {
     }
     
     const remainingStr = fixedLine1;
-    const ninMatch = remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
+    const directNin = remainingStr.match(/[CAP][MF][A-Z0-9]{12}/i);
+    if (directNin) {
+      const candidateNin = normalizeNinCandidate(directNin[0], mrzDob);
+      if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
+    }
+
+    const ninMatch = !data.nin && remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
     if (ninMatch) {
       let p1 = ninMatch[1].toUpperCase();
       const p2 = ninMatch[2];
@@ -692,9 +811,13 @@ function parseMRZ(text) {
       else if (/[PRE35]/.test(p1[1])) p1 = p1[0] + 'F';
       
       const candidateNin = normalizeNinCandidate(p1 + p2 + p3, mrzDob);
-      if (candidateNin.length === 14) {
+      if (validateNin(candidateNin, mrzDob)) {
         data.nin = candidateNin;
       }
+    }
+
+    if (data.nin && NEW_NIN_REGEX.test(data.nin) && cardNoRaw.length >= 9) {
+      data.card_no = 'CA' + cardNoRaw.slice(0, 9);
     }
   }
 
@@ -710,7 +833,7 @@ function parseMRZ(text) {
     }
     
     if (firstChevronIdx >= 0 && gRaw.replace(/[^A-Z]/g, '').length > 0) {
-      let sur = normalizeNameStrict(sRaw);
+      let sur = normalizeNameStrict(cleanMrzNameToken(sRaw));
       let giv = normalizeNameStrict(gRaw);
       
       const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER','SUENAML','SURNAME','NATIONALITY','SEX','BIRTH','EXPIRY','HOLDER','SIGNATURE','DATE','OF','LS','LA','AS','IS','TO','BATH','MAME','BATE','ATIONALITY','OER','WONA','TEE','LAMERY']);
@@ -777,6 +900,30 @@ const BACK_ROIS = {
   mrz_line3:     ROI.BACK.MRZ_LINE_3
 };
 
+const NEW_FRONT_ROIS = {
+  surname:       { x: 235, y: 118, w: 180, h: 44 },
+  given_names:   { x: 235, y: 176, w: 180, h: 44 },
+  nationality:   { x: 235, y: 292, w: 120, h: 48 },
+  sex:           { x: 435, y: 276, w: 75,  h: 48 },
+  dob:           { x: 520, y: 276, w: 190, h: 48 },
+  nin:           { x: 235, y: 350, w: 285, h: 48 },
+  issue_date:    { x: 235, y: 405, w: 190, h: 48 },
+  expiry:        { x: 520, y: 405, w: 190, h: 48 },
+  card_no:       { x: 650, y: 462, w: 200, h: 55 }
+};
+
+const NEW_BACK_ROIS = {
+  address_block: { x: 0,   y: 8,   w: 835, h: 100 },
+  district:      { x: 108, y: 12,  w: 180, h: 30  },
+  county:        { x: 108, y: 47,  w: 250, h: 30  },
+  sub_county:    { x: 123, y: 81,  w: 180, h: 30  },
+  parish:        { x: 445, y: 12,  w: 210, h: 30  },
+  village:       { x: 470, y: 52,  w: 170, h: 24  },
+  mrz_line1:     { x: 8,   y: 352, w: 840, h: 58  },
+  mrz_line2:     { x: 8,   y: 410, w: 840, h: 58  },
+  mrz_line3:     { x: 8,   y: 468, w: 840, h: 58  }
+};
+
 const SYNTHETIC_FRONT_ROIS = {
   surname:      { x: 0.4150, y: 0.1250, w: 0.3950, h: 0.0700 },
   given_names:  { x: 0.4150, y: 0.2070, w: 0.3950, h: 0.0700 },
@@ -802,12 +949,18 @@ const FIELD_OCR_SETTINGS = {
   sex:           { psm: '6', whitelist: 'MF' },
   dob:           { psm: '6', whitelist: '0123456789.' },
   nin:           { psm: '6', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
+  issue_date:    { psm: '6', whitelist: '0123456789.' },
   expiry:        { psm: '6', whitelist: '0123456789.' },
-  card_no:       { psm: '8', whitelist: '0123456789' },
+  card_no:       { psm: '8', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
   mrz_line1:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
   mrz_line2:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
   mrz_line3:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
-  address_block: { psm: '6', whitelist: '' }
+  address_block: { psm: '6', whitelist: '' },
+  district:      { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  county:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  sub_county:    { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  parish:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  village:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' }
 };
 
 // ─── Merge + MRZ backfill ────────────────────────────────────────────────
@@ -935,7 +1088,7 @@ function mergeAndApplyMrzBackfill(merged) {
   out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
   out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
   out.given_names = reconcileName(front.given_names, mrz.given_names);
-  out.card_no     = front.card_no || mrz.card_no || '';
+  out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
   out.nationality = normalizeNationality(back.nationality) ||
                     normalizeNationality(front.nationality) ||
                     ((out.nin || out.dob || out.surname) ? 'UGA' : '');
@@ -945,6 +1098,7 @@ function mergeAndApplyMrzBackfill(merged) {
   out.dob         = validateDob(out.dob) || out.dob;
   out.sex         = validateSexOrBlank(out.sex) || out.sex;
   out.expiry      = validateExpiry(out.expiry) || out.expiry;
+  out.card_no     = normalizeCardNumber(out.card_no);
 
   // Confidence scores
   const confidence = {};
@@ -976,18 +1130,21 @@ function mergeAndApplyMrzBackfill(merged) {
 function reconcileDob(frontDob, mrzDob) {
   const vFront = validateDob(frontDob);
   const vMrz   = validateDob(mrzDob);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
   return vFront || vMrz || frontDob || mrzDob || '';
 }
 
 function reconcileExpiry(frontExpiry, mrzExpiry) {
   const vFront = validateExpiry(frontExpiry);
   const vMrz   = validateExpiry(mrzExpiry);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
   return vFront || vMrz || frontExpiry || mrzExpiry || '';
 }
 
 function reconcileSex(frontSex, mrzSex) {
   const vFront = validateSexOrBlank(frontSex);
   const vMrz   = validateSexOrBlank(mrzSex);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
   return vFront || vMrz || frontSex || mrzSex || '';
 }
 
@@ -1024,7 +1181,7 @@ function reconcileNins(frontNin, mrzNin, dob) {
       }
     }
     const merged = chars.join('');
-    return validateNin(merged, dob) || vFront;
+    return validateNin(merged, dob) || vMrz || vFront;
   }
   
   const cleanFront = validateNin(frontNin, dob);
@@ -1041,7 +1198,7 @@ function reconcileNins(frontNin, mrzNin, dob) {
     if (validateNin(cand, dob)) return cand;
   }
 
-  return frontNin || mrzNin || '';
+  return '';
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────
@@ -1050,6 +1207,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ROI,
     FRONT_ROIS,
     BACK_ROIS,
+    NEW_FRONT_ROIS,
+    NEW_BACK_ROIS,
     SYNTHETIC_FRONT_ROIS,
     SYNTHETIC_BACK_ROIS,
     FIELD_OCR_SETTINGS,
@@ -1079,6 +1238,8 @@ if (typeof module !== 'undefined' && module.exports) {
   window.ROI = ROI;
   window.FRONT_ROIS = FRONT_ROIS;
   window.BACK_ROIS = BACK_ROIS;
+  window.NEW_FRONT_ROIS = NEW_FRONT_ROIS;
+  window.NEW_BACK_ROIS = NEW_BACK_ROIS;
   window.SYNTHETIC_FRONT_ROIS = SYNTHETIC_FRONT_ROIS;
   window.SYNTHETIC_BACK_ROIS = SYNTHETIC_BACK_ROIS;
   window.FIELD_OCR_SETTINGS = FIELD_OCR_SETTINGS;
