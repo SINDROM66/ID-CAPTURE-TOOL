@@ -1065,12 +1065,40 @@ function classifyCardLayout(canvas, side) {
     return 'old-front';
   }
 
-  // MRZ text and a dark code at the upper right exist on both generations.
-  // The new PDF417 block occupies the middle of the card; the old code sits
-  // much higher, leaving the middle mostly clear for the address block.
-  const middleBarcode = darkRatioInRegion(canvas, 0.04, 0.30, 0.92, 0.31);
-  if (middleBarcode > 0.17) return 'new-back';
-  return 'old-back';
+  // Combine barcode position with address-row texture. Either signal alone is
+  // sensitive to lighting and alignment; extraction scoring below remains the
+  // final safety net when this initial guess is wrong.
+  const lowerBarcode = darkRatioInRegion(canvas, 0.04, 0.40, 0.92, 0.18);
+
+  const rowVarianceInRegion = (x0, y0, w0, h0) => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const x = Math.max(0, Math.round(x0 * canvas.width));
+    const y = Math.max(0, Math.round(y0 * canvas.height));
+    const w = Math.min(canvas.width - x, Math.round(w0 * canvas.width));
+    const h = Math.min(canvas.height - y, Math.round(h0 * canvas.height));
+    if (w <= 0 || h <= 0) return 0;
+    const data = ctx.getImageData(x, y, w, h).data;
+    const rowRatios = [];
+    for (let row = 0; row < h; row++) {
+      let dark = 0;
+      for (let col = 0; col < w; col++) {
+        const i = (row * w + col) * 4;
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        if (lum < 110) dark++;
+      }
+      rowRatios.push(dark / Math.max(1, w));
+    }
+    const mean = rowRatios.reduce((a, b) => a + b, 0) / Math.max(1, rowRatios.length);
+    return rowRatios.reduce((a, b) => a + (b - mean) * (b - mean), 0) /
+      Math.max(1, rowRatios.length);
+  };
+
+  const topBandVariance = rowVarianceInRegion(0.02, 0.02, 0.90, 0.18);
+  const midBandVariance = rowVarianceInRegion(0.08, 0.28, 0.85, 0.26);
+  let newVotes = 0, oldVotes = 0;
+  if (lowerBarcode > 0.15) newVotes++; else oldVotes++;
+  if (topBandVariance > midBandVariance) newVotes++; else oldVotes++;
+  return newVotes > oldVotes ? 'new-back' : 'old-back';
 }
 
 function roisForLayout(layout, side) {
@@ -1254,7 +1282,26 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       return { field, text: (result.data.text || '').trim() };
     });
 
-    const frontResults = await Promise.all(frontPromises);
+    // A second, layout-independent pass protects against small perspective or
+    // edge-detection shifts that move a value outside its narrow field ROI.
+    // Its output is only used when a strictly validated ROI value is absent.
+    const fullFrontPromise = (async () => {
+      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_pageseg_mode: '6'
+      });
+      const preprocessed = preprocessROI(frontCanvas, 1.6, 'full_front');
+      const result = await worker.recognize(preprocessed.toDataURL('image/png'));
+      await worker.terminate();
+      return (result.data.text || '').trim();
+    })();
+
+    const [frontResults, fullFrontText] = await Promise.all([
+      Promise.all(frontPromises),
+      fullFrontPromise
+    ]);
     frontResults.forEach(r => {
       let val = r.text;
       if (r.field === 'nin') {
@@ -1265,33 +1312,36 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       roiFront[r.field] = val;
     });
 
+    const fullFrontData = parseFront(fullFrontText);
     frontData = {
       surname:     normalizeNameStrict(roiFront.surname),
       given_names: normalizeNameStrict(roiFront.given_names),
-      nationality: roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '',
-      sex:         validateSexOrBlank(roiFront.sex),
-      dob:         parseAndFormatDob(roiFront.dob),
-      nin:         validateNin(roiFront.nin) || roiFront.nin,
-      expiry:      parseAndFormatDob(roiFront.expiry) || roiFront.expiry,
+      nationality: (roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '') || fullFrontData.nationality || '',
+      sex:         validateSexOrBlank(roiFront.sex) || fullFrontData.sex || '',
+      dob:         parseAndFormatDob(roiFront.dob) || fullFrontData.dob || '',
+      nin:         validateNin(roiFront.nin) || fullFrontData.nin || '',
+      expiry:      parseAndFormatDob(roiFront.expiry) || fullFrontData.expiry || '',
       issue_date:  parseAndFormatDob(roiFront.issue_date) || roiFront.issue_date || '',
-      card_no:     (roiFront.card_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+      card_no:     (roiFront.card_no || fullFrontData.card_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
     };
+
+    if (!isPersonNameStrict(frontData.surname) && fullFrontData.surname) {
+      frontData.surname = fullFrontData.surname;
+    }
+    if (!isPersonNameStrict(frontData.given_names) && fullFrontData.given_names) {
+      frontData.given_names = fullFrontData.given_names;
+    }
 
     rawFront = `LAYOUT: ${frontLayout}\nSURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nISSUE DATE: ${roiFront.issue_date || ''}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
   }
 
-  if (backCanvas) {
-    const backLayout = classifyCardLayout(backCanvas, 'back');
-    state.layouts.back = backLayout;
-    let backRois = roisForLayout(backLayout, 'back');
-    if (backLayout === 'new-back') {
-      const dynamicMrz = detectDynamicMrzRois(backCanvas);
-      if (dynamicMrz) backRois = Object.assign({}, backRois, dynamicMrz);
-    }
-    console.log('Back card layout:', backLayout);
-
-    setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
-
+  async function runBackOcrForLayout(layout) {
+    let backRois = roisForLayout(layout, 'back');
+    // MRZ position varies with card generation and small residual perspective
+    // shifts. Detect its three text bands for both layouts and keep the
+    // generation-specific address ROIs.
+    const dynamicMrz = detectDynamicMrzRois(backCanvas);
+    if (dynamicMrz) backRois = Object.assign({}, backRois, dynamicMrz);
     const backFields = Object.keys(backRois);
     const backResults = await Promise.all(backFields.map(async (field) => {
       const settings = FIELD_OCR_SETTINGS[field] || { psm: '6', whitelist: '' };
@@ -1317,7 +1367,8 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       .map(k => `${k.replace('_', ' ').toUpperCase()}: ${backRaw[k]}`)
       .join('\n');
     const addrText = [backRaw.address_block || '', directAddressText].filter(Boolean).join('\n');
-    const mrzText  = [backRaw.mrz_line1, backRaw.mrz_line2, backRaw.mrz_line3].filter(v => v !== undefined).join('\n');
+    const mrzLines = [backRaw.mrz_line1, backRaw.mrz_line2, backRaw.mrz_line3].filter(v => v !== undefined);
+    const mrzText = mrzLines.join('\n');
 
     const backAddrData = parseBack(addrText);
     const backMrzData = parseMRZ(mrzText);
@@ -1342,7 +1393,7 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       return chosen;
     };
 
-    backData = Object.assign({}, backAddrData, {
+    const layoutBackData = Object.assign({}, backAddrData, {
       district:    preferLocation(backRaw.district, backAddrData.district, 'district'),
       county:      preferLocation(backRaw.county, backAddrData.county, 'county'),
       sub_county:  preferLocation(backRaw.sub_county, backAddrData.sub_county, 'sub_county'),
@@ -1358,7 +1409,40 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       nationality: backMrzData.nationality || backAddrData.nationality || '',
     });
 
-    rawBack = `LAYOUT: ${backLayout}\nADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
+    const layoutRawBack = `LAYOUT: ${layout}\nADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
+    return {
+      layout,
+      backData: layoutBackData,
+      rawBack: layoutRawBack,
+      score: scoreBackExtraction(layoutBackData, mrzLines)
+    };
+  }
+
+  if (backCanvas) {
+    const guessedLayout = classifyCardLayout(backCanvas, 'back');
+    state.layouts.back = guessedLayout;
+    console.log('Back card layout (initial guess):', guessedLayout);
+    setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
+
+    let winner = await runBackOcrForLayout(guessedLayout);
+    const LOW_CONFIDENCE_SCORE = 6;
+    const altLayout = guessedLayout === 'new-back' ? 'old-back'
+      : guessedLayout === 'old-back' ? 'new-back'
+      : null;
+
+    if (altLayout && winner.score < LOW_CONFIDENCE_SCORE) {
+      console.log(`Back layout "${guessedLayout}" scored low (${winner.score}); retrying as "${altLayout}"`);
+      const alt = await runBackOcrForLayout(altLayout);
+      console.log(`Back layout scores - ${guessedLayout}: ${winner.score}, ${altLayout}: ${alt.score}`);
+      if (alt.score > winner.score) {
+        winner = alt;
+        state.layouts.back = altLayout;
+      }
+    }
+
+    backData = winner.backData;
+    rawBack = winner.rawBack;
+    console.log('Back card layout (final):', state.layouts.back, 'score:', winner.score);
   }
 
   setProgress(95, 'Finalising…', 'Building form');

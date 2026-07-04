@@ -734,8 +734,12 @@ function parseMRZ(text) {
   // Parse Line 2: dob, sex, expiry (parsed first so DOB is available for Line 1 NIN year alignment)
   let mrzDob = '';
   if (line2) {
-    const r2start = line2.search(/[0-9]/);
-    let raw2trim = r2start >= 0 ? line2.slice(r2start) : line2;
+    // Search after correcting OCR letter/digit confusion. A leading DOB zero
+    // is commonly read as O; searching the raw line would skip it and shift
+    // every fixed-width MRZ field that follows.
+    const fixedLine2ForStart = fixN(line2);
+    const r2start = fixedLine2ForStart.search(/[0-9]/);
+    let raw2trim = r2start >= 0 ? fixedLine2ForStart.slice(r2start) : line2;
     let dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
     if (!dob && /^[1-9][0-9]{5}[0-9MF]/.test(raw2trim)) {
       const repaired = '0' + raw2trim;
@@ -967,6 +971,23 @@ const FIELD_OCR_SETTINGS = {
   village:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' }
 };
 
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
 // ─── Merge + MRZ backfill ────────────────────────────────────────────────
 function reconcileName(frontName, mrzName) {
   if (!frontName) return mrzName || '';
@@ -1002,6 +1023,14 @@ function reconcileName(frontName, mrzName) {
         reconciled.push(mt);
       } else if (ft.startsWith(mt) || ft.endsWith(mt)) {
         reconciled.push(ft);
+      } else if (mrzLooksValid) {
+        const dist = levenshtein(ft, mt);
+        const maxLen = Math.max(ft.length, mt.length);
+        if (maxLen > 0 && dist <= 2 && dist / maxLen <= 0.34) {
+          reconciled.push(mt);
+        } else {
+          reconciled.push(ft);
+        }
       } else {
         reconciled.push(ft); // default fallback
       }
@@ -1054,6 +1083,40 @@ function repairUgandaSurname(raw) {
   return name;
 }
 
+function looksLikeMrzLine(line) {
+  const l = (line || '').toString().toUpperCase().replace(/\s+/g, '');
+  if (l.length < 18) return false;
+  const alnumChevron = (l.match(/[A-Z0-9<]/g) || []).length;
+  if (alnumChevron / l.length < 0.85) return false;
+  const digits = (l.match(/[0-9]/g) || []).length;
+  const chevrons = (l.match(/</g) || []).length;
+  return digits >= 3 || chevrons >= 1;
+}
+
+function looksLikeMrzBlock(lines) {
+  const arr = (lines || []).filter(Boolean);
+  const validCount = arr.filter(looksLikeMrzLine).length;
+  const hasIdMarker = arr.some(l => /ID[A-Z]{3}/i.test(l));
+  const hasNinPattern = arr.some(l => /[CAP][MF][A-Z0-9]{9,12}/i.test(l));
+  return validCount >= 2 && (hasIdMarker || hasNinPattern);
+}
+
+function scoreBackExtraction(backData, mrzLines) {
+  const d = backData || {};
+  let score = 0;
+  if (validateNin(d.nin, d.dob)) score += 2;
+  if (validateDob(d.dob)) score += 2;
+  if (validateSexOrBlank(d.sex)) score += 1;
+  if (validateExpiry(d.expiry)) score += 1;
+  if (isPersonNameStrict(normalizeNameStrict(d.surname))) score += 2;
+  if (d.given_names && normalizeNameStrict(d.given_names)) score += 1;
+  ['village', 'parish', 'sub_county', 'county', 'district'].forEach(k => {
+    if (cleanLocationNameStrict(d[k])) score += 1;
+  });
+  if (looksLikeMrzBlock(mrzLines)) score += 2;
+  return score;
+}
+
 // Accepts { front: {}, back: {} } and returns a merged flat result object.
 function mergeAndApplyMrzBackfill(merged) {
   const front = merged.front || {};
@@ -1098,10 +1161,10 @@ function mergeAndApplyMrzBackfill(merged) {
                     ((out.nin || out.dob || out.surname) ? 'UGA' : '');
 
   // Apply validations and corrections
-  out.nin         = validateNin(out.nin) || out.nin;
-  out.dob         = validateDob(out.dob) || out.dob;
-  out.sex         = validateSexOrBlank(out.sex) || out.sex;
-  out.expiry      = validateExpiry(out.expiry) || out.expiry;
+  out.nin         = validateNin(out.nin);
+  out.dob         = validateDob(out.dob);
+  out.sex         = validateSexOrBlank(out.sex);
+  out.expiry      = validateExpiry(out.expiry);
   out.card_no     = normalizeCardNumber(out.card_no);
 
   // Confidence scores
@@ -1207,7 +1270,10 @@ if (typeof module !== 'undefined' && module.exports) {
     reconcileSex,
     reconcileNins,
     correctNIN,
-    correctDate
+    correctDate,
+    looksLikeMrzLine,
+    looksLikeMrzBlock,
+    scoreBackExtraction
   };
 } else {
   // Browser global exposure
@@ -1239,4 +1305,7 @@ if (typeof module !== 'undefined' && module.exports) {
   window.reconcileNins = reconcileNins;
   window.correctNIN = correctNIN;
   window.correctDate = correctDate;
+  window.looksLikeMrzLine = looksLikeMrzLine;
+  window.looksLikeMrzBlock = looksLikeMrzBlock;
+  window.scoreBackExtraction = scoreBackExtraction;
 }
