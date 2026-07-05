@@ -614,7 +614,19 @@ function chooseAutomaticCorners(img) {
   const accepted = candidates.find(candidate => candidate.score.confidence >= candidate.minimum);
   if (accepted) return accepted;
 
+  // None of the methods cleared its strict threshold. Accept a plausible
+  // best candidate and let downstream image-quality and OCR-confidence checks
+  // decide whether the capture is usable instead of aborting before OCR.
   const best = candidates[0];
+  const ABSOLUTE_FLOOR = 0.34;
+  if (best && best.score.confidence >= ABSOLUTE_FLOOR) {
+    console.warn(
+      `Accepting low-confidence ${best.source} crop (score ${best.score.confidence.toFixed(2)}, ` +
+      `below its normal ${best.minimum} threshold) rather than hard-failing to manual entry.`
+    );
+    return Object.assign({}, best, { minimum: ABSOLUTE_FLOOR });
+  }
+
   return best || { corners: null, score: { confidence: 0, label: 'none' }, source: 'none' };
 }
 

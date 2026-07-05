@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nssf-id-capture-v15';
+const CACHE_NAME = 'nssf-id-capture-v16';
 const ASSETS = [
   './',
   './index.html',
