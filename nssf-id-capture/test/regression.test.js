@@ -118,6 +118,24 @@ test('scoreBackExtraction: correct old-back OCR scores far higher than misclassi
     `expected correct-layout score (${correctScore}) to clearly beat wrong-layout score (${wrongScore})`);
 });
 
+test('real-world weak-photo back extraction falls below the address trust floor', () => {
+  const weakAttempt = p.parseBack([
+    'DISTRICT: RIGHT THLIMR',
+    'COUNTY: GBILITEV VIVIVITWY',
+    'SUB COUNTY: ER',
+    'VILLAGE: IR'
+  ].join('\n'));
+  const wrongMrzLines = [
+    'NAKAWA',
+    'NAKAWADIVISION',
+    'BISTRICT KARPR PALS CC S NX V'
+  ];
+  const score = p.scoreBackExtraction(weakAttempt, wrongMrzLines);
+  const MIN_TRUSTWORTHY_BACK_SCORE = 8;
+  assert.ok(score < MIN_TRUSTWORTHY_BACK_SCORE,
+    `expected weak-photo score ${score} below trust floor ${MIN_TRUSTWORTHY_BACK_SCORE}`);
+});
+
 console.log('\n=== Fixture: MUYUNGA new-front / new-back card ===');
 
 const MUYUNGA_MRZ_LINES = [

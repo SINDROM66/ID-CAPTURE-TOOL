@@ -1452,6 +1452,21 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       }
     }
 
+    // Both layout attempts can be poor on a genuinely weak photo. Identity
+    // fields have strict validators, but address fields only have lightweight
+    // text cleanup, so suppress them unless the overall extraction is strong.
+    const MIN_TRUSTWORTHY_BACK_SCORE = 8;
+    if (winner.score < MIN_TRUSTWORTHY_BACK_SCORE) {
+      console.warn(
+        `Back extraction score (${winner.score}) is below the trustworthy floor ` +
+        `(${MIN_TRUSTWORTHY_BACK_SCORE}); blanking address fields instead of ` +
+        'showing low-confidence text.'
+      );
+      ['district', 'county', 'sub_county', 'parish', 'village'].forEach(k => {
+        winner.backData[k] = '';
+      });
+    }
+
     backData = winner.backData;
     rawBack = winner.rawBack;
     console.log('Back card layout (final):', state.layouts.back, 'score:', winner.score);
