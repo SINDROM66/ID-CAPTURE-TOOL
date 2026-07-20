@@ -1577,26 +1577,51 @@ function fillForm(d) {
 function saveRecord() {
   const g = id => (document.getElementById(id)?.value || '').trim();
 
-  const nin = g('f-nin');
   const sur = g('f-surname');
+  const giv = g('f-given');
+  const sex = g('f-sex');
+  const dob = g('f-dob');
+  const nat = g('f-nationality');
+  const nin = g('f-nin');
+  const phn = g('f-phone');
 
-  if (!nin && !sur) {
+  // Validate mandatory fields (all except f-other)
+  const requiredFields = [
+    { id: 'f-surname', name: 'Surname', value: sur },
+    { id: 'f-given', name: 'Given Name(s)', value: giv },
+    { id: 'f-sex', name: 'Sex', value: sex },
+    { id: 'f-dob', name: 'Date of Birth', value: dob },
+    { id: 'f-nationality', name: 'Nationality', value: nat },
+    { id: 'f-nin', name: 'NIN — National ID Number', value: nin },
+    { id: 'f-phone', name: 'Phone Number', value: phn }
+  ];
+
+  const missing = requiredFields.filter(f => !f.value).map(f => f.name);
+
+  if (missing.length > 0) {
     document.getElementById('form-alert').innerHTML = alert('error',
-      'Please enter at least the <strong>NIN</strong> and <strong>Surname</strong> before saving.');
+      `Please fill in all mandatory fields: <strong>${missing.join(', ')}</strong>.`);
+    return;
+  }
+
+  // Validate NIN length: must have at least 14 characters
+  if (nin.length < 14) {
+    document.getElementById('form-alert').innerHTML = alert('error',
+      'The <strong>NIN — National ID Number</strong> must be at least 14 characters long.');
     return;
   }
 
   const record = {
     sn: state.records.length + 1,
-    surname: g('f-surname'),
-    given_names: g('f-given'),
+    surname: sur,
+    given_names: giv,
     other_name: g('f-other'),
-    full_name: (g('f-surname') + ' ' + g('f-given') + ' ' + g('f-other')).trim().replace(/\s+/g, ' '),
-    sex: g('f-sex'),
-    dob: g('f-dob'),
-    nin: g('f-nin'),
-    nationality: g('f-nationality'),
-    phone: g('f-phone')
+    full_name: (sur + ' ' + giv + ' ' + g('f-other')).trim().replace(/\s+/g, ' '),
+    sex: sex,
+    dob: dob,
+    nin: nin,
+    nationality: nat,
+    phone: phn
   };
 
   state.records.push(record);
