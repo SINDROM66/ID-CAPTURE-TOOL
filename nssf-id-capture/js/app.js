@@ -1792,16 +1792,16 @@ function exportExcel() {
   }
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'NSSF SmartLife Data');
+  XLSX.utils.book_append_sheet(wb, ws, 'NSSF Member Data');
 
   const summaryData = [
-    ['NSSF SMARTLIFE FLEXI — ENROLMENT DATA EXPORT'],
+    ['NSSF DIGITAL PRE-REGISTRATION — MEMBER DATA EXPORT'],
     [],
     ['Total Records', state.records.length],
     ['Export Date', new Date().toLocaleDateString('en-UG', { dateStyle: 'long' })],
     ['Export Time', new Date().toLocaleTimeString('en-UG')],
     [],
-    ['Tool', 'NSSF ID Capture Tool v1.0'],
+    ['Tool', 'NSSF Member Data Capture Tool v1.0'],
     ['Mode', 'Offline (Tesseract.js OCR)'],
     ['Note', 'All extracted data should be verified against original ID before use.']
   ];
@@ -1809,7 +1809,7 @@ function exportExcel() {
   ws2['!cols'] = [{ wch: 20 }, { wch: 50 }];
   XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
 
-  const filename = `NSSF_SmartLife_${todayISO()}.xlsx`;
+  const filename = `NSSF_Member_Data_${todayISO()}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
 

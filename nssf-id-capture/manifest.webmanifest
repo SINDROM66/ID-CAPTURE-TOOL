@@ -1,7 +1,7 @@
 {
-  "name": "NSSF SmartLife Flexi ID Capture",
-  "short_name": "NSSF ID Capture",
-  "description": "Offline Uganda National ID capture and OCR tool for NSSF SmartLife Flexi enrolment.",
+  "name": "NSSF Member Data Capture",
+  "short_name": "NSSF Capture",
+  "description": "Offline Uganda National ID capture and pre-registration tool for NSSF.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
