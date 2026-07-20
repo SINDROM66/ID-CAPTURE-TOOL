@@ -1487,10 +1487,10 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
   if (rawBack)  document.getElementById('raw-back-text').textContent  = '\n=== BACK ===\n' + rawBack;
 
   const hasAny = [
-    'surname', 'given_names', 'sex', 'dob', 'nin', 'expiry'
+    'surname', 'given_names', 'sex', 'dob', 'nin'
   ].some(k => merged2[k] && String(merged2[k]).trim().length > 0);
 
-  const identityRequired = ['nin', 'dob', 'sex', 'surname', 'expiry'];
+  const identityRequired = ['nin', 'dob', 'sex', 'surname'];
   const missingIdentity = identityRequired.filter(k => !merged2[k]);
 
   const okNinDob = !!merged2.nin && !!merged2.dob;
@@ -1528,8 +1528,7 @@ function applyConfidenceBorders(conf) {
     given_names: 'f-given',
     sex: 'f-sex',
     dob: 'f-dob',
-    nin: 'f-nin',
-    expiry: 'f-expiry'
+    nin: 'f-nin'
   };
 
   Object.keys(mapFieldToId).forEach(k => {
@@ -1567,10 +1566,10 @@ function fillForm(d) {
 
   set('f-surname', d.surname);
   set('f-given', d.given_names);
+  set('f-other', d.other_name || '');
   set('f-sex', d.sex);
   set('f-dob', d.dob);
   set('f-nin', d.nin);
-  set('f-expiry', d.expiry);
   set('f-nationality', d.nationality);
 }
 
@@ -1591,11 +1590,11 @@ function saveRecord() {
     sn: state.records.length + 1,
     surname: g('f-surname'),
     given_names: g('f-given'),
-    full_name: (g('f-surname') + ' ' + g('f-given')).trim(),
+    other_name: g('f-other'),
+    full_name: (g('f-surname') + ' ' + g('f-given') + ' ' + g('f-other')).trim().replace(/\s+/g, ' '),
     sex: g('f-sex'),
     dob: g('f-dob'),
     nin: g('f-nin'),
-    expiry: g('f-expiry'),
     nationality: g('f-nationality'),
     phone: g('f-phone')
   };
@@ -1662,7 +1661,7 @@ function resetCapture() {
   }
 
   const fields = [
-    'f-surname','f-given','f-sex','f-dob','f-nin','f-expiry','f-nationality','f-phone'
+    'f-surname','f-given','f-other','f-sex','f-dob','f-nin','f-nationality','f-phone'
   ];
 
   fields.forEach(id => {
@@ -1717,13 +1716,12 @@ function renderRecordsTable() {
     <tr>
       <td><span class="sn-chip">${r.sn}</span></td>
       <td class="name-cell">
-        <strong>${r.surname || '—'}</strong> ${r.given_names || ''}
+        <strong>${r.surname || '—'}</strong> ${r.given_names || ''} ${r.other_name || ''}
       </td>
       <td>${r.nationality || '—'}</td>
       <td>${r.sex || '—'}</td>
       <td style="font-family:monospace;font-size:11px">${r.nin || '—'}</td>
       <td>${r.dob || '—'}</td>
-      <td>${r.expiry || '—'}</td>
       <td>${r.phone || '—'}</td>
     </tr>
   `).join('');
@@ -1739,7 +1737,6 @@ function renderRecordsTable() {
             <th>Sex</th>
             <th>NIN</th>
             <th>DOB</th>
-            <th>Expiry</th>
             <th>Phone</th>
           </tr>
         </thead>
@@ -1767,17 +1764,17 @@ function exportExcel() {
     'NIN': r.nin,
     'SURNAME': r.surname,
     'GIVEN NAMES': r.given_names,
+    'OTHER NAME': r.other_name || '',
     'FULL NAME': r.full_name,
     'NATIONALITY': r.nationality,
     'SEX': r.sex,
     'DATE OF BIRTH': r.dob,
-    'DATE OF EXPIRY': r.expiry,
     'PHONE NUMBER': r.phone
   }));
 
   const ws = XLSX.utils.json_to_sheet(rows);
   ws['!cols'] = [
-    {wch:5},{wch:17},{wch:14},{wch:18},{wch:24},{wch:14},{wch:5},{wch:14},{wch:14},{wch:14}
+    {wch:5},{wch:17},{wch:14},{wch:18},{wch:15},{wch:26},{wch:14},{wch:5},{wch:14},{wch:14}
   ];
 
   const headerStyle = {
