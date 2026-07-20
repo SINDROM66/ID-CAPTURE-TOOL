@@ -12,7 +12,8 @@ const state = {
   ocr: { running: false },
   installPrompt: null,
   scanMode: true,
-  layouts: { front: 'old-front', back: 'old-back' }
+  layouts: { front: 'old-front', back: 'old-back' },
+  captureMode: 'scan'
 };
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
@@ -1617,26 +1618,36 @@ function resetCapture() {
     if (elCam) elCam.value = '';
     const zone = document.getElementById('zone-' + side);
     const inner = document.getElementById('zone-' + side + '-inner');
-    zone.classList.remove('loaded');
+    if (zone) zone.classList.remove('loaded');
 
-    const icons = {
-      front: `<svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2"/><path d="M22 12H17l-2 4H9L7 12H2"/></svg>`,
-      back:  `<svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>`
-    };
-    const labels = { front: 'Front of ID', back: 'Back of ID' };
-    const subs = { front: 'Name · NIN · DOB · Sex', back: 'Back MRZ (optional backup)' };
+    if (inner) {
+      const icons = {
+        front: `<svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2"/><path d="M22 12H17l-2 4H9L7 12H2"/></svg>`,
+        back:  `<svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>`
+      };
+      const labels = { front: 'Front of ID', back: 'Back of ID' };
+      const subs = { front: 'Name · NIN · DOB · Sex', back: 'Back MRZ (optional backup)' };
 
-    inner.innerHTML = `
-      ${icons[side]}
-      <p class="uzone-label">${labels[side]}</p>
-      <small>${subs[side]}</small>
-    `;
+      inner.innerHTML = `
+        ${icons[side]}
+        <p class="uzone-label">${labels[side]}</p>
+        <small>${subs[side]}</small>
+      `;
+    }
   });
 
   document.getElementById('upload-status').innerHTML = '';
   document.getElementById('form-alert').innerHTML = '';
   document.getElementById('card-progress').style.display = 'none';
-  document.getElementById('card-form').style.display = 'none';
+  
+  if (state.captureMode === 'manual') {
+    document.getElementById('card-upload').style.display = 'none';
+    document.getElementById('card-form').style.display = 'block';
+  } else {
+    document.getElementById('card-upload').style.display = 'block';
+    document.getElementById('card-form').style.display = 'none';
+  }
+  
   document.getElementById('btn-extract').disabled = true;
   document.getElementById('raw-block').style.display = 'none';
   document.getElementById('raw-front-text').textContent = '';
@@ -1662,6 +1673,23 @@ function resetCapture() {
       el.style.boxShadow = '';
     }
   });
+}
+
+function setCaptureMode(mode) {
+  state.captureMode = mode;
+  
+  const scanBtn = document.getElementById('mode-scan-btn');
+  const manualBtn = document.getElementById('mode-manual-btn');
+  
+  if (mode === 'scan') {
+    if (scanBtn) scanBtn.classList.add('active');
+    if (manualBtn) manualBtn.classList.remove('active');
+    resetCapture();
+  } else {
+    if (scanBtn) scanBtn.classList.remove('active');
+    if (manualBtn) manualBtn.classList.add('active');
+    resetCapture();
+  }
 }
 
 // ─── Records table ────────────────────────────

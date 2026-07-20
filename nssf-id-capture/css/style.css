@@ -877,3 +877,40 @@ tbody tr:hover td { background: #f5faff; }
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
+
+/* ─── Mode Toggle (Segmented Control) ────────── */
+.mode-toggle-row {
+  display: flex;
+  background: rgba(221, 229, 239, 0.6);
+  padding: 4px;
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  gap: 4px;
+}
+
+.mode-toggle-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  border: none;
+  background: transparent;
+  border-radius: calc(var(--radius) - 2px);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+
+.mode-toggle-btn:hover {
+  color: var(--primary);
+}
+
+.mode-toggle-btn.active {
+  background: var(--card-bg);
+  color: var(--primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
