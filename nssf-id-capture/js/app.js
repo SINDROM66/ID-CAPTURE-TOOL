@@ -13,7 +13,7 @@ const state = {
   installPrompt: null,
   scanMode: true,
   layouts: { front: 'old-front', back: 'old-back' },
-  captureMode: 'scan'
+  captureMode: localStorage.getItem('nssf_capture_mode') || 'scan'
 };
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
@@ -1677,6 +1677,7 @@ function resetCapture() {
 
 function setCaptureMode(mode) {
   state.captureMode = mode;
+  localStorage.setItem('nssf_capture_mode', mode);
   
   const scanBtn = document.getElementById('mode-scan-btn');
   const manualBtn = document.getElementById('mode-manual-btn');
@@ -1901,4 +1902,5 @@ window.showSourceSelector = showSourceSelector;
 // ─── Init ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupInstallAppButton();
+  setCaptureMode(state.captureMode);
 });
