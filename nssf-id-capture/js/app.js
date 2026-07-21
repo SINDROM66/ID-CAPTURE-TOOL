@@ -1627,7 +1627,13 @@ function saveRecord() {
   state.records.push(record);
   updateTabBadge();
   resetCapture();
-  switchTab('records');
+
+  // Display a brief success message so the user has immediate feedback
+  const feedbackElId = state.captureMode === 'manual' ? 'form-alert' : 'upload-status';
+  const feedbackEl = document.getElementById(feedbackElId);
+  if (feedbackEl) {
+    feedbackEl.innerHTML = alert('success', `Record for <strong>${record.full_name}</strong> saved successfully!`);
+  }
 }
 
 // ─── Reset capture flow ───────────────────────
