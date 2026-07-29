@@ -1269,83 +1269,37 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
   if (frontCanvas) {
     const frontLayout = classifyCardLayout(frontCanvas, 'front');
     state.layouts.front = frontLayout;
-    const frontRois = roisForLayout(frontLayout, 'front');
     console.log('Front card layout:', frontLayout);
 
-    setProgress(15, 'Reading front ROIs in parallel…', 'Running Tesseract workers');
+    setProgress(20, 'Reading entire front of ID card…', 'Running Tesseract worker');
 
-    // Parallel extraction for front
-    const fields = Object.keys(frontRois);
-    const frontPromises = fields.map(async (field) => {
-      const settings = FIELD_OCR_SETTINGS[field];
-      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-      await worker.setParameters({
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-        tessedit_char_whitelist: settings.whitelist || '',
-        tessedit_pageseg_mode: settings.psm
-      });
-
-      const cropped = cropROI(frontCanvas, frontRois[field], field);
-      const preprocessed = preprocessROI(cropped, 3.0, field);
-      const dataUrl = preprocessed.toDataURL('image/png');
-
-      const result = await worker.recognize(dataUrl);
-      await worker.terminate();
-      return { field, text: (result.data.text || '').trim() };
+    const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+    await worker.setParameters({
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+      tessedit_pageseg_mode: '6'
     });
 
-    // A second, layout-independent pass protects against small perspective or
-    // edge-detection shifts that move a value outside its narrow field ROI.
-    // Its output is only used when a strictly validated ROI value is absent.
-    const fullFrontPromise = (async () => {
-      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-      await worker.setParameters({
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-        tessedit_pageseg_mode: '6'
-      });
-      const preprocessed = preprocessROI(frontCanvas, 1.6, 'full_front');
-      const result = await worker.recognize(preprocessed.toDataURL('image/png'));
-      await worker.terminate();
-      return (result.data.text || '').trim();
-    })();
+    const preprocessed = preprocessROI(frontCanvas, 1.6, 'full_front');
+    const result = await worker.recognize(preprocessed.toDataURL('image/png'));
+    await worker.terminate();
 
-    const [frontResults, fullFrontText] = await Promise.all([
-      Promise.all(frontPromises),
-      fullFrontPromise
-    ]);
-    frontResults.forEach(r => {
-      let val = r.text;
-      if (r.field === 'nin') {
-        val = correctNIN(val);
-      } else if (r.field === 'dob' || r.field === 'expiry') {
-        val = correctDate(val);
-      }
-      roiFront[r.field] = val;
-    });
-
+    const fullFrontText = (result.data.text || '').trim();
     const fullFrontData = parseFront(fullFrontText);
+
     frontData = {
-      surname:     normalizeNameStrict(roiFront.surname),
-      given_names: normalizeNameStrict(roiFront.given_names),
-      nationality: (roiFront.nationality ? roiFront.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '') || fullFrontData.nationality || '',
-      sex:         validateSexOrBlank(roiFront.sex) || fullFrontData.sex || '',
-      dob:         parseAndFormatDob(roiFront.dob) || fullFrontData.dob || '',
-      nin:         validateNin(roiFront.nin) || fullFrontData.nin || '',
-      expiry:      parseAndFormatDob(roiFront.expiry) || fullFrontData.expiry || '',
-      issue_date:  parseAndFormatDob(roiFront.issue_date) || roiFront.issue_date || '',
-      card_no:     (roiFront.card_no || fullFrontData.card_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+      surname:     normalizeNameStrict(fullFrontData.surname) || '',
+      given_names: normalizeNameStrict(fullFrontData.given_names) || '',
+      nationality: (fullFrontData.nationality ? fullFrontData.nationality.toUpperCase().replace(/[^A-Z]/g, '') : '') || '',
+      sex:         validateSexOrBlank(fullFrontData.sex) || '',
+      dob:         parseAndFormatDob(fullFrontData.dob) || '',
+      nin:         validateNin(fullFrontData.nin) || '',
+      expiry:      parseAndFormatDob(fullFrontData.expiry) || '',
+      issue_date:  parseAndFormatDob(fullFrontData.issue_date) || '',
+      card_no:     (fullFrontData.card_no || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
     };
 
-    if (!isPersonNameStrict(frontData.surname) && fullFrontData.surname) {
-      frontData.surname = fullFrontData.surname;
-    }
-    if (!isPersonNameStrict(frontData.given_names) && fullFrontData.given_names) {
-      frontData.given_names = fullFrontData.given_names;
-    }
-
-    rawFront = `LAYOUT: ${frontLayout}\nSURNAME: ${roiFront.surname}\nGIVEN NAMES: ${roiFront.given_names}\nNATIONALITY: ${roiFront.nationality}\nSEX: ${roiFront.sex}\nDOB: ${roiFront.dob}\nNIN: ${roiFront.nin}\nISSUE DATE: ${roiFront.issue_date || ''}\nEXPIRY: ${roiFront.expiry}\nCARD NO: ${roiFront.card_no}`;
+    rawFront = `LAYOUT: ${frontLayout}\n=== FULL FRONT OCR RAW ===\n${fullFrontText}`;
   }
 
   async function runBackOcrForLayout(layout) {
