@@ -13,7 +13,9 @@ const state = {
   installPrompt: null,
   scanMode: true,
   layouts: { front: 'old-front', back: 'old-back' },
-  captureMode: localStorage.getItem('nssf_capture_mode') || 'scan'
+  captureMode: localStorage.getItem('nssf_capture_mode') || 'scan',
+  dataQualityFlag: '',
+  barcodeWarnings: []
 };
 
 // constants FRONT_ROIS, BACK_ROIS, and FIELD_OCR_SETTINGS are accessed as globals from parser.js
@@ -1330,23 +1332,56 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
     state.layouts.back = backLayout;
     console.log('Back card layout:', backLayout);
 
-    setProgress(60, 'Reading entire back of ID card…', 'Running Tesseract worker');
+    setProgress(55, 'Scanning PDF417 barcode on back of ID…', 'Decoding symbol');
+    try {
+      const record = await UgIdParser.parseCardImage(backCanvas, { debug: false });
+      console.log('PDF417 Barcode scanned successfully!', record);
 
-    const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-    await worker.setParameters({
-      preserve_interword_spaces: '1',
-      user_defined_dpi: '300',
-      tessedit_pageseg_mode: '6'
-    });
+      const formatDateToDisplay = (d) => {
+        if (!d || !(d instanceof Date)) return '';
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const year = d.getUTCFullYear();
+        return `${day}.${month}.${year}`;
+      };
 
-    const preprocessed = preprocessROI(backCanvas, 1.6, 'full_back');
-    const result = await worker.recognize(preprocessed.toDataURL('image/png'));
-    await worker.terminate();
+      backData = {
+        surname:     record.surname || '',
+        given_names: record.givenName || '',
+        other_name:  record.otherName || '',
+        sex:         record.sex || '',
+        dob:         formatDateToDisplay(record.dateOfBirth),
+        nin:         record.nin || '',
+        expiry:      formatDateToDisplay(record.expiryDate),
+        issue_date:  formatDateToDisplay(record.issueDate),
+        card_no:     record.cardNumber || '',
+        source:      'barcode',
+        barcodeWarnings: record.warnings || []
+      };
 
-    const fullBackText = (result.data.text || '').trim();
-    backData = parseBack(fullBackText);
+      rawBack = `=== PDF417 BARCODE READ ===\n${UgIdParser.render(record)}`;
+    } catch (err) {
+      console.warn('PDF417 Barcode scan failed, falling back to OCR:', err.message);
+      
+      setProgress(60, 'Reading entire back of ID card (OCR fallback)…', 'Running Tesseract worker');
 
-    rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
+      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_pageseg_mode: '6'
+      });
+
+      const preprocessed = preprocessROI(backCanvas, 1.6, 'full_back');
+      const result = await worker.recognize(preprocessed.toDataURL('image/png'));
+      await worker.terminate();
+
+      const fullBackText = (result.data.text || '').trim();
+      backData = parseBack(fullBackText);
+      backData.source = 'ocr';
+
+      rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
+    }
   }
 
   setProgress(95, 'Finalising…', 'Building form');
@@ -1354,6 +1389,10 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
 
   const merged = { front: frontData, back: backData };
   const merged2 = mergeAndApplyMrzBackfill(merged);
+  
+  state.dataQualityFlag = merged2.dataQualityFlag || '';
+  state.barcodeWarnings = merged2.barcodeWarnings || [];
+
   fillForm(merged2);
   applyConfidenceBorders(merged2.confidence || {});
 
@@ -1374,10 +1413,19 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
 
   const showSuccess = hasAny && (okNinDob || okSurnameDob);
 
-  document.getElementById('form-alert').innerHTML =
-    showSuccess
-      ? alert('warning', 'Data extracted — please <strong>review every field</strong> carefully before saving. OCR may have minor errors. Use the raw text below to verify.')
-      : alert('error', 'OCR could not confidently read enough identity data. Retake clear, close photos of the full card with no glare, then extract again.');
+  let alertHtml = showSuccess
+    ? alert('warning', 'Data extracted — please <strong>review every field</strong> carefully before saving. OCR may have minor errors. Use the raw text below to verify.')
+    : alert('error', 'OCR could not confidently read enough identity data. Retake clear, close photos of the full card with no glare, then extract again.');
+
+  if (merged2.dataQualityFlag) {
+    alertHtml += '<br>' + alert('error', `<strong>Barcode & OCR Mismatch Detected!</strong><br>${merged2.dataQualityFlag.replace(/; /g, '<br>')}`);
+  }
+
+  if (merged2.barcodeWarnings && merged2.barcodeWarnings.length > 0) {
+    alertHtml += '<br>' + alert('warning', `<strong>Barcode Warnings:</strong><br>${merged2.barcodeWarnings.join('<br>')}`);
+  }
+
+  document.getElementById('form-alert').innerHTML = alertHtml;
 
   setProgress(100, 'Done', '');
   console.log('OCR complete. merged2:', JSON.stringify(merged2));
@@ -1497,7 +1545,8 @@ function saveRecord() {
     dob: dob,
     nin: nin,
     nationality: nat,
-    phone: phn
+    phone: phn,
+    data_quality_flag: state.dataQualityFlag || ''
   };
 
   state.records.push(record);
@@ -1515,6 +1564,8 @@ function saveRecord() {
 // ─── Reset capture flow ───────────────────────
 function resetCapture() {
   state.files = { front: null, back: null };
+  state.dataQualityFlag = '';
+  state.barcodeWarnings = [];
 
   // Reset upload zones
   ['front', 'back'].forEach(side => {
@@ -1676,12 +1727,13 @@ function exportExcel() {
     'NATIONALITY': r.nationality,
     'SEX': r.sex,
     'DATE OF BIRTH': r.dob,
-    'PHONE NUMBER': r.phone
+    'PHONE NUMBER': r.phone,
+    'DATA QUALITY FLAG': r.data_quality_flag || ''
   }));
 
   const ws = XLSX.utils.json_to_sheet(rows);
   ws['!cols'] = [
-    {wch:5},{wch:17},{wch:14},{wch:18},{wch:15},{wch:26},{wch:14},{wch:5},{wch:14},{wch:14}
+    {wch:5},{wch:17},{wch:14},{wch:18},{wch:15},{wch:26},{wch:14},{wch:5},{wch:14},{wch:14},{wch:30}
   ];
 
   const headerStyle = {

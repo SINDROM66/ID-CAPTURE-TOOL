@@ -1087,6 +1087,38 @@ function mergeAndApplyMrzBackfill(merged) {
     card_no:     back.card_no     || '',
   };
 
+  let dataQualityFlag = '';
+  let barcodeOcrMismatches = [];
+
+  if (back.source === 'barcode') {
+    // Check Surname mismatch
+    if (front.surname && back.surname && front.surname.toUpperCase().trim() !== back.surname.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Surname mismatch (Front OCR: "${front.surname}", Barcode: "${back.surname}")`);
+    }
+    // Check Given Names mismatch
+    if (front.given_names && back.given_names && front.given_names.toUpperCase().trim() !== back.given_names.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Given Names mismatch (Front OCR: "${front.given_names}", Barcode: "${back.given_names}")`);
+    }
+    // Check DOB mismatch
+    if (front.dob && back.dob && front.dob !== back.dob) {
+      barcodeOcrMismatches.push(`DOB mismatch (Front OCR: "${front.dob}", Barcode: "${back.dob}")`);
+    }
+    // Check NIN mismatch
+    if (front.nin && back.nin && front.nin.toUpperCase().trim() !== back.nin.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`NIN mismatch (Front OCR: "${front.nin}", Barcode: "${back.nin}")`);
+    }
+    // Check Sex mismatch
+    if (front.sex && back.sex && front.sex.toUpperCase().trim() !== back.sex.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Sex mismatch (Front OCR: "${front.sex}", Barcode: "${back.sex}")`);
+    }
+
+    if (barcodeOcrMismatches.length > 0) {
+      dataQualityFlag = 'Mismatches: ' + barcodeOcrMismatches.join('; ');
+    }
+  }
+
+
+
   let out = {
     surname:     '',
     given_names: '',
@@ -1103,26 +1135,37 @@ function mergeAndApplyMrzBackfill(merged) {
     district:    back.district    || '',
   };
 
-  // Reconcile dates, sex, and NINs using prioritized accuracy rules
-  out.dob         = reconcileDob(front.dob, mrz.dob);
-  out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
-  out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
-  out.sex         = reconcileSex(front.sex, mrz.sex);
+  if (back.source === 'barcode') {
+    out.dob         = back.dob || front.dob || '';
+    out.expiry      = back.expiry || front.expiry || '';
+    out.nin         = back.nin || front.nin || '';
+    out.sex         = back.sex || front.sex || '';
+    out.surname     = back.surname || front.surname || '';
+    out.given_names = back.given_names || front.given_names || '';
+    out.card_no     = back.card_no || front.card_no || '';
+    out.nationality = back.nationality || front.nationality || 'UGA';
+  } else {
+    // Reconcile dates, sex, and NINs using prioritized accuracy rules
+    out.dob         = reconcileDob(front.dob, mrz.dob);
+    out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
+    out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
+    out.sex         = reconcileSex(front.sex, mrz.sex);
 
-  // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
-  if (!out.sex && out.nin && out.nin.length >= 2) {
-    const derivedSex = out.nin[1].toUpperCase();
-    if (derivedSex === 'M' || derivedSex === 'F') {
-      out.sex = derivedSex;
+    // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
+    if (!out.sex && out.nin && out.nin.length >= 2) {
+      const derivedSex = out.nin[1].toUpperCase();
+      if (derivedSex === 'M' || derivedSex === 'F') {
+        out.sex = derivedSex;
+      }
     }
-  }
 
-  out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
-  out.given_names = reconcileName(front.given_names, mrz.given_names);
-  out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
-  out.nationality = normalizeNationality(back.nationality) ||
-                    normalizeNationality(front.nationality) ||
-                    ((out.nin || out.dob || out.surname) ? 'UGA' : '');
+    out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
+    out.given_names = reconcileName(front.given_names, mrz.given_names);
+    out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
+    out.nationality = normalizeNationality(back.nationality) ||
+                      normalizeNationality(front.nationality) ||
+                      ((out.nin || out.dob || out.surname) ? 'UGA' : '');
+  }
 
   // Apply validations and corrections
   out.nin         = validateNin(out.nin);
@@ -1155,6 +1198,8 @@ function mergeAndApplyMrzBackfill(merged) {
   }
 
   out.confidence = confidence;
+  out.dataQualityFlag = dataQualityFlag;
+  out.barcodeWarnings = back.barcodeWarnings || [];
   return out;
 }
 

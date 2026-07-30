@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nssf-id-capture-v17';
+const CACHE_NAME = 'nssf-id-capture-v18';
 const ASSETS = [
   './',
   './index.html',
@@ -6,6 +6,8 @@ const ASSETS = [
   './css/style.css',
   './js/app.js',
   './js/parser.js',
+  './js/ug-id-parser.js',
+  './js/vendor/zxing.umd.min.js',
   './js/xlsx.full.min.js',
   './js/tesseract.min.js',
   './js/opencv.js',
