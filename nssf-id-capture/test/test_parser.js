@@ -59,7 +59,17 @@ A
 Martin  Specimen
 `;
 
-const rawBack = ``;
+const rawBack = `
+VILLAGE: VILLAGE 12
+PARISH: NTINDA
+S.COUNTY: NAKAWA
+COUNTY: NAKAWA DIVISION
+DISTRICT: KAMPALA
+
+IDUGA0193072462CM000351093UXF<
+0009139M2901215UGA190121<<<<<<7
+LYOMOKI<<SAMUEL<JUNIOR<<<<<<<<
+`;
 
 console.log("--- PARSING FRONT ---");
 const frontData = parseFront(rawFront);

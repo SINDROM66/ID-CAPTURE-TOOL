@@ -1302,129 +1302,28 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
     rawFront = `LAYOUT: ${frontLayout}\n=== FULL FRONT OCR RAW ===\n${fullFrontText}`;
   }
 
-  async function runBackOcrForLayout(layout) {
-    let backRois = roisForLayout(layout, 'back');
-    // MRZ position varies with card generation and small residual perspective
-    // shifts. Detect its three text bands for both layouts and keep the
-    // generation-specific address ROIs.
-    const dynamicMrz = detectDynamicMrzRois(backCanvas);
-    if (dynamicMrz) backRois = Object.assign({}, backRois, dynamicMrz);
-    const backFields = Object.keys(backRois);
-    const backResults = await Promise.all(backFields.map(async (field) => {
-      const settings = FIELD_OCR_SETTINGS[field] || { psm: '6', whitelist: '' };
-      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-      await worker.setParameters({
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-        tessedit_char_whitelist: settings.whitelist || '',
-        tessedit_pageseg_mode: settings.psm
-      });
-      const scale = 3.0;
-      const cropped = cropROI(backCanvas, backRois[field], field);
-      const preprocessed = preprocessROI(cropped, scale, field);
-      const res = await worker.recognize(preprocessed.toDataURL('image/png'));
-      await worker.terminate();
-      return { field, text: (res.data.text || '').trim() };
-    }));
+  if (backCanvas) {
+    const backLayout = classifyCardLayout(backCanvas, 'back');
+    state.layouts.back = backLayout;
+    console.log('Back card layout:', backLayout);
 
-    const backRaw = {};
-    backResults.forEach(r => { backRaw[r.field] = r.text; });
-    const directAddressText = ['district', 'county', 'sub_county', 'parish', 'village']
-      .filter(k => backRaw[k])
-      .map(k => `${k.replace('_', ' ').toUpperCase()}: ${backRaw[k]}`)
-      .join('\n');
-    const addrText = [backRaw.address_block || '', directAddressText].filter(Boolean).join('\n');
-    const mrzLines = [backRaw.mrz_line1, backRaw.mrz_line2, backRaw.mrz_line3].filter(v => v !== undefined);
-    const mrzText = mrzLines.join('\n');
+    setProgress(60, 'Reading entire back of ID card…', 'Running Tesseract worker');
 
-    const backAddrData = parseBack(addrText);
-    const backMrzData = parseMRZ(mrzText);
-    const preferLocation = (direct, parsed, field) => {
-      const d = cleanLocationNameStrict(direct);
-      const p = cleanLocationNameStrict(parsed);
-      let chosen = '';
-      if (!d) chosen = p || '';
-      else if (!p) chosen = d;
-      else {
-      const dTokens = d.split(/\s+/).length;
-      const pTokens = p.split(/\s+/).length;
-        if (dTokens > pTokens + 1) chosen = p;
-        else if (!d.includes(p) && !p.includes(d) && p.length >= 4 && d.length <= 10) chosen = p;
-        else chosen = d;
-      }
-      chosen = chosen.replace(/^R\s+(?=[A-Z])/, '');
-      if (field === 'village') {
-        const parish = cleanLocationNameStrict(backAddrData.parish);
-        if (parish && chosen === `${parish} I`) return `${parish} II`;
-      }
-      return chosen;
-    };
-
-    const layoutBackData = Object.assign({}, backAddrData, {
-      district:    preferLocation(backRaw.district, backAddrData.district, 'district'),
-      county:      preferLocation(backRaw.county, backAddrData.county, 'county'),
-      sub_county:  preferLocation(backRaw.sub_county, backAddrData.sub_county, 'sub_county'),
-      parish:      preferLocation(backRaw.parish, backAddrData.parish, 'parish'),
-      village:     preferLocation(backRaw.village, backAddrData.village, 'village'),
-      card_no:     backMrzData.card_no     || backAddrData.card_no     || '',
-      expiry:      backMrzData.expiry      || backAddrData.expiry      || '',
-      nin:         backMrzData.nin         || backAddrData.nin         || '',
-      dob:         backMrzData.dob         || backAddrData.dob         || '',
-      sex:         backMrzData.sex         || backAddrData.sex         || '',
-      surname:     backMrzData.surname     || backAddrData.surname     || '',
-      given_names: backMrzData.given_names || backAddrData.given_names || '',
-      nationality: backMrzData.nationality || backAddrData.nationality || '',
+    const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+    await worker.setParameters({
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+      tessedit_pageseg_mode: '6'
     });
 
-    const layoutRawBack = `LAYOUT: ${layout}\nADDRESS BLOCK:\n${addrText}\n\nMRZ:\n${mrzText}`;
-    return {
-      layout,
-      backData: layoutBackData,
-      rawBack: layoutRawBack,
-      score: scoreBackExtraction(layoutBackData, mrzLines)
-    };
-  }
+    const preprocessed = preprocessROI(backCanvas, 1.6, 'full_back');
+    const result = await worker.recognize(preprocessed.toDataURL('image/png'));
+    await worker.terminate();
 
-  if (backCanvas) {
-    const guessedLayout = classifyCardLayout(backCanvas, 'back');
-    state.layouts.back = guessedLayout;
-    console.log('Back card layout (initial guess):', guessedLayout);
-    setProgress(60, 'Reading back block and MRZ…', 'Running Tesseract workers');
+    const fullBackText = (result.data.text || '').trim();
+    backData = parseBack(fullBackText);
 
-    let winner = await runBackOcrForLayout(guessedLayout);
-    const LOW_CONFIDENCE_SCORE = 6;
-    const altLayout = guessedLayout === 'new-back' ? 'old-back'
-      : guessedLayout === 'old-back' ? 'new-back'
-      : null;
-
-    if (altLayout && winner.score < LOW_CONFIDENCE_SCORE) {
-      console.log(`Back layout "${guessedLayout}" scored low (${winner.score}); retrying as "${altLayout}"`);
-      const alt = await runBackOcrForLayout(altLayout);
-      console.log(`Back layout scores - ${guessedLayout}: ${winner.score}, ${altLayout}: ${alt.score}`);
-      if (alt.score > winner.score) {
-        winner = alt;
-        state.layouts.back = altLayout;
-      }
-    }
-
-    // Both layout attempts can be poor on a genuinely weak photo. Identity
-    // fields have strict validators, but address fields only have lightweight
-    // text cleanup, so suppress them unless the overall extraction is strong.
-    const MIN_TRUSTWORTHY_BACK_SCORE = 8;
-    if (winner.score < MIN_TRUSTWORTHY_BACK_SCORE) {
-      console.warn(
-        `Back extraction score (${winner.score}) is below the trustworthy floor ` +
-        `(${MIN_TRUSTWORTHY_BACK_SCORE}); blanking address fields instead of ` +
-        'showing low-confidence text.'
-      );
-      ['district', 'county', 'sub_county', 'parish', 'village'].forEach(k => {
-        winner.backData[k] = '';
-      });
-    }
-
-    backData = winner.backData;
-    rawBack = winner.rawBack;
-    console.log('Back card layout (final):', state.layouts.back, 'score:', winner.score);
+    rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
   }
 
   setProgress(95, 'Finalising…', 'Building form');

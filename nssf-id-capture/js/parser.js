@@ -50,91 +50,49 @@ function cleanMrzNameToken(t) {
   });
 }
 
+function tryNormalizeOldFormat(chars) {
+  const c = [...chars];
+  for (let i = 2; i <= 10; i++) {
+    if (LETTER_TO_DIGIT[c[i]]) c[i] = LETTER_TO_DIGIT[c[i]];
+  }
+  for (let i = 11; i <= 13; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  return c.join('');
+}
+
+function tryNormalizeNewFormat(chars) {
+  const c = [...chars];
+  const newDigitMap = { ...LETTER_TO_DIGIT, 'Z': '7', 'T': '7', 'Y': '7', 'L': '1' };
+  for (let i = 2; i <= 8; i++) {
+    if (LETTER_TO_DIGIT[c[i]]) c[i] = LETTER_TO_DIGIT[c[i]];
+  }
+  for (let i = 9; i <= 10; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  if (newDigitMap[c[11]]) c[11] = newDigitMap[c[11]];
+  for (let i = 12; i <= 13; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  return c.join('');
+}
+
 function normalizeNinCandidate(candidate, dob) {
   let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const embeddedNin = v.match(/[CAP][MF][A-Z0-9]{12}/);
+  const embeddedNin = v.match(/[CAP1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
   if (embeddedNin && embeddedNin[0] !== v) {
     return normalizeNinCandidate(embeddedNin[0], dob);
   }
-  if (OLD_NIN_REGEX.test(v)) return v;
 
-  // New Uganda NID cards can carry alphanumeric tail material earlier than the
-  // old template. If it is already structurally valid, keep it intact instead
-  // of forcing old-card digit positions.
-  if (/^[CAP][MF][A-Z0-9]{12}$/.test(v)) {
-    const chars = v.split('');
-    const newDigitMap = { ...LETTER_TO_DIGIT, 'Z': '7', 'T': '7', 'Y': '7', 'L': '1' };
-    for (let i = 2; i <= 8; i++) {
-      if (LETTER_TO_DIGIT[chars[i]]) chars[i] = LETTER_TO_DIGIT[chars[i]];
+  // Extract a 14-character NIN candidate if present in a longer string
+  if (v.length !== 14) {
+    const match = v.match(/([CAP1G0OI4L][MFN13PR0-9BH])([A-Z0-9]{12})/i);
+    if (match) {
+      v = match[0];
+    } else {
+      return '';
     }
-    if (DIGIT_TO_LETTER[chars[9]]) chars[9] = DIGIT_TO_LETTER[chars[9]];
-    if (DIGIT_TO_LETTER[chars[10]]) chars[10] = DIGIT_TO_LETTER[chars[10]];
-    if (newDigitMap[chars[11]]) chars[11] = newDigitMap[chars[11]];
-    if (DIGIT_TO_LETTER[chars[12]]) chars[12] = DIGIT_TO_LETTER[chars[12]];
-    if (DIGIT_TO_LETTER[chars[13]]) chars[13] = DIGIT_TO_LETTER[chars[13]];
-    v = chars.join('');
-    if (NEW_NIN_REGEX.test(v)) return v;
-    if (OLD_NIN_REGEX.test(v)) return v;
   }
-
-  // Extract a 14-character NIN candidate if present in a longer string, allowing OCR-garbled prefix and digits
-  const match = v.match(/([CAP1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
-  if (match) {
-    let p = match[1];
-    let d = match[2];
-    let s = match[3].slice(0, 3);
-    
-    // Normalize prefix first character
-    if (/[1G0OIL]/.test(p[0])) p = 'C' + p[1];
-    else if (p[0] === '4') p = 'A' + p[1];
-    else if (p[0] === 'P') p = 'P' + p[1];
-    else if (!/[CAP]/.test(p[0])) p = 'C' + p[1];
-    
-    // Normalize prefix second character
-    if (/[1NHK0OI8LH]/.test(p[1])) p = p[0] + 'M';
-    else if (/[PRE35]/.test(p[1])) p = p[0] + 'F';
-    else if (!/[MF]/.test(p[1])) p = p[0] + 'M';
-    
-    // DOB Year alignment for first two digits of digits group
-    if (dob && dob.includes('.')) {
-      const parts = dob.split('.');
-      if (parts.length === 3) {
-        const year = parts[2];
-        if (year && year.length === 4) {
-          const yy = year.slice(2);
-          const dChars = d.split('');
-          if (dChars[0] !== yy[0] && (dChars[0] === 'E' || dChars[0] === 'C' || !/[0-9]/.test(dChars[0]))) {
-            dChars[0] = yy[0];
-          }
-          if (dChars[1] !== yy[1] && (dChars[1] === 'R' || dChars[1] === 'B' || !/[0-9]/.test(dChars[1]))) {
-            dChars[1] = yy[1];
-          }
-          d = dChars.join('');
-        }
-      }
-    }
-
-    // Normalize digits (positions 2-10)
-    const digitsMap = { 
-      'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
-      'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
-      'P':'9', 'H':'8' 
-    };
-    let cleanDigits = d.split('').map(c => digitsMap[c] || c).join('');
-    
-    // Normalize suffix (positions 11-13)
-    const suffixMap = { '0':'O','1':'I','5':'S','8':'B','6':'G','4':'A','2':'Z','3':'J' };
-    let cleanSuffix = s.split('').map(c => suffixMap[c] || c).join('');
-    
-    v = p + cleanDigits + cleanSuffix;
-  }
-
-  // Auto-correct duplicate first zero/O (15-character edge case e.g. CMO0... or CM00...)
-  if (v.length === 15 && /^[CAP][MF][0O]{2}/.test(v)) {
-    v = v.slice(0, 2) + v.slice(3);
-  }
-
-  if (v.length !== 14) return v; // let validateNin reject it
 
   // Position-aware structural normalization
   const chars = v.split('');
@@ -148,39 +106,36 @@ function normalizeNinCandidate(candidate, dob) {
   else if (chars[0] !== 'A' && chars[0] !== 'P') chars[0] = 'C';
   if (chars[1] === 'N' || chars[1] === 'H' || chars[1] === 'K') chars[1] = 'M';
 
-  // Apply DOB Year correction before standard letter-to-digit confusions
+  // Apply DOB Year alignment for first two digits of digits group
   if (dob && dob.includes('.')) {
     const parts = dob.split('.');
     if (parts.length === 3) {
       const year = parts[2];
       if (year && year.length === 4) {
         const yy = year.slice(2);
-        if (chars[2] !== yy[0] && (!/[0-9]/.test(chars[2]) || chars[2] === 'E' || chars[2] === 'C')) {
+        if (chars[2] !== yy[0] && (chars[2] === 'E' || chars[2] === 'C' || !/[0-9]/.test(chars[2]))) {
           chars[2] = yy[0];
         }
-        if (chars[3] !== yy[1] && (!/[0-9]/.test(chars[3]) || chars[3] === 'R' || chars[3] === 'B')) {
+        if (chars[3] !== yy[1] && (chars[3] === 'R' || chars[3] === 'B' || !/[0-9]/.test(chars[3]))) {
           chars[3] = yy[1];
         }
       }
     }
   }
 
-  // Positions 2-10: must be digits
-  const LETTER_TO_DIGIT_EXPANDED = { 
-    'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
-    'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
-    'P':'9', 'H':'8' 
-  };
-  for (let i = 2; i <= 10; i++) {
-    if (LETTER_TO_DIGIT_EXPANDED[chars[i]]) chars[i] = LETTER_TO_DIGIT_EXPANDED[chars[i]];
-  }
+  // Try old format correction
+  const oldCand = tryNormalizeOldFormat(chars);
+  if (OLD_NIN_REGEX.test(oldCand)) return oldCand;
 
-  // Positions 11-13: must be letters
-  for (let i = 11; i <= 13; i++) {
-    if (DIGIT_TO_LETTER[chars[i]]) chars[i] = DIGIT_TO_LETTER[chars[i]];
-  }
+  // Try new format correction
+  const newCand = tryNormalizeNewFormat(chars);
+  if (NEW_NIN_REGEX.test(newCand)) return newCand;
 
-  return chars.join('');
+  // Fallback: check broad NIN_REGEX or return old candidate as best effort
+  if (NIN_REGEX.test(oldCand)) return oldCand;
+  if (NIN_REGEX.test(newCand)) return newCand;
+
+  return oldCand;
 }
 
 function fixDigitsOnly(str) {
@@ -536,20 +491,20 @@ function parseBack(raw) {
   // Labels are searched most-specific first (S.COUNTY before COUNTY) to avoid
   // partial matches (e.g. 'COUNTY' matching inside 'S.COUNTY').
   const ADDR_LABELS = [
-    { pattern: /^S[\s.]?COUNTY[\s:]+(.+)$/i,  field: 'sub_county' },
-    { pattern: /^VILLAGE[\s:]+(.+)$/i,          field: 'village'   },
-    { pattern: /^PARISH[\s:]+(.+)$/i,           field: 'parish'    },
-    { pattern: /^COUNTY[\s:]+(.+)$/i,           field: 'county'    },
-    { pattern: /^DISTRICT[\s:]+(.+)$/i,         field: 'district'  },
+    { pattern: /^[^A-Za-z0-9]*S[\s.]?COUNTY[\s:]+(.+)$/i,  field: 'sub_county' },
+    { pattern: /^[^A-Za-z0-9]*VILLAGE[\s:]+(.+)$/i,          field: 'village'   },
+    { pattern: /^[^A-Za-z0-9]*PARISH[\s:]+(.+)$/i,           field: 'parish'    },
+    { pattern: /^[^A-Za-z0-9]*COUNTY[\s:]+(.+)$/i,           field: 'county'    },
+    { pattern: /^[^A-Za-z0-9]*DISTRICT[\s:]+(.+)$/i,         field: 'district'  },
   ];
 
   // Also accept value-only format (label on separate line, value on next)
   const LABEL_ONLY = [
-    { pattern: /^S[\s.]?COUNTY$/i,  field: 'sub_county' },
-    { pattern: /^VILLAGE$/i,         field: 'village'   },
-    { pattern: /^PARISH$/i,          field: 'parish'    },
-    { pattern: /^COUNTY$/i,          field: 'county'    },
-    { pattern: /^DISTRICT$/i,        field: 'district'  },
+    { pattern: /^[^A-Za-z0-9]*S[\s.]?COUNTY$/i,  field: 'sub_county' },
+    { pattern: /^[^A-Za-z0-9]*VILLAGE$/i,         field: 'village'   },
+    { pattern: /^[^A-Za-z0-9]*PARISH$/i,          field: 'parish'    },
+    { pattern: /^[^A-Za-z0-9]*COUNTY$/i,          field: 'county'    },
+    { pattern: /^[^A-Za-z0-9]*DISTRICT$/i,        field: 'district'  },
   ];
 
   const allLines = up.split('\n').map(l => l.trim()).filter(Boolean);
@@ -1151,8 +1106,17 @@ function mergeAndApplyMrzBackfill(merged) {
   // Reconcile dates, sex, and NINs using prioritized accuracy rules
   out.dob         = reconcileDob(front.dob, mrz.dob);
   out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
-  out.sex         = reconcileSex(front.sex, mrz.sex);
   out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
+  out.sex         = reconcileSex(front.sex, mrz.sex);
+
+  // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
+  if (!out.sex && out.nin && out.nin.length >= 2) {
+    const derivedSex = out.nin[1].toUpperCase();
+    if (derivedSex === 'M' || derivedSex === 'F') {
+      out.sex = derivedSex;
+    }
+  }
+
   out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
   out.given_names = reconcileName(front.given_names, mrz.given_names);
   out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
