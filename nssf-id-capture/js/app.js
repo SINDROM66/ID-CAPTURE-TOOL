@@ -761,6 +761,29 @@ function drawDebugCanvas(warpedCanvas) {
  */
 function getWarpedCanvasOrFallback(img, side) {
   return new Promise((resolve, reject) => {
+    const bypassToggle = document.getElementById('bypass-autocrop');
+    const bypass = bypassToggle && bypassToggle.checked;
+
+    if (bypass) {
+      console.log(`Bypassing auto-crop for ${side}.`);
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        const fullCorners = [
+          { x: 0, y: 0 },
+          { x: w, y: 0 },
+          { x: w, y: h },
+          { x: 0, y: h }
+        ];
+        const warped = warpCard(img, fullCorners);
+        drawDebugCanvas(warped);
+        resolve(warped);
+      } catch (err) {
+        reject(err);
+      }
+      return;
+    }
+
     const result = chooseAutomaticCorners(img);
     if (result.corners && result.score.confidence >= (result.minimum || 0.58)) {
       console.log(`Automatic ${side} card crop (${result.source}).`, result.score);
@@ -1780,8 +1803,15 @@ function showSourceSelector(side) {
 }
 window.showSourceSelector = showSourceSelector;
 
-// ─── Init ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupInstallAppButton();
   setCaptureMode(state.captureMode);
+
+  const bypassToggle = document.getElementById('bypass-autocrop');
+  if (bypassToggle) {
+    bypassToggle.checked = localStorage.getItem('nssf_bypass_autocrop') === 'true';
+    bypassToggle.addEventListener('change', (e) => {
+      localStorage.setItem('nssf_bypass_autocrop', e.target.checked);
+    });
+  }
 });
