@@ -824,6 +824,38 @@ function loadImage(file) {
   });
 }
 
+/**
+ * Like loadImage() but uses URL.createObjectURL() instead of
+ * FileReader.readAsDataURL(). This is critical for the barcode scanner:
+ * readAsDataURL() decodes the JPEG into a base64 string and then into a
+ * bitmap, and Android WebView / Chrome for Android silently downsamples
+ * large bitmaps to fit within its internal texture limit (often ~900x1600),
+ * destroying the resolution the scanner needs.
+ *
+ * createObjectURL() gives the browser a direct reference to the raw JPEG
+ * bytes; the image element reports the JPEG's true decoded dimensions
+ * (e.g. 3024x4032 from a phone camera) without any intermediate downscale.
+ *
+ * The blob URL is revoked immediately after the image loads to free memory.
+ * Do NOT use this function for the OCR path — OCR uses loadImage() and the
+ * two paths must remain independent.
+ */
+function loadImageNative(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Selected file is not a readable image'));
+    };
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.src = url;
+  });
+}
+
 function alignCardToStandard(img) {
   // Standard canvas: 1000×1000 virtual units (ROI coords are already normalized 0–1)
   // Physical Uganda NID ratio: 85.6mm × 53.98mm = 1.586:1
@@ -1862,9 +1894,13 @@ async function runBarcodeCapture(file) {
   setProgress(10, 'Loading image…', 'Preparing barcode scan');
 
   try {
-    // ── Load the raw image ────────────────────────────────────────────
-    const img = await loadImage(file);
-    console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight}, passing directly to UgIdParser`);
+    // ── Load the raw image at full JPEG resolution ─────────────────────
+    // loadImageNative() uses URL.createObjectURL() — NOT FileReader.readAsDataURL().
+    // readAsDataURL decodes the JPEG into a base64 bitmap, which Android WebView
+    // silently downsamples to ~900x1600. createObjectURL gives the browser a
+    // direct reference to the raw JPEG bytes, preserving native camera resolution.
+    const img = await loadImageNative(file);
+    console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight} (file: ${(file.size/1024).toFixed(0)} KB), passing directly to UgIdParser`);
     setProgress(30, 'Scanning PDF417 barcode…', 'Decoding symbol — no preprocessing applied');
 
     // ── The ONLY call that matters in this entire path ──────────────────
