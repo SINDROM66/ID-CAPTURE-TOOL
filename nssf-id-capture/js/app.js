@@ -1564,8 +1564,18 @@ function saveRecord() {
   updateTabBadge();
   resetCapture();
 
-  // Display a brief success message so the user has immediate feedback
-  const feedbackElId = state.captureMode === 'manual' ? 'form-alert' : 'upload-status';
+  // Display a brief success message so the user has immediate feedback.
+  // For 'scan' mode: upload-status (inside card-upload).
+  // For 'barcode' mode: barcode-upload-status (inside card-barcode-upload).
+  // For 'manual' mode: form-alert (still visible on the cleared form).
+  let feedbackElId;
+  if (state.captureMode === 'manual') {
+    feedbackElId = 'form-alert';
+  } else if (state.captureMode === 'barcode') {
+    feedbackElId = 'barcode-upload-status';
+  } else {
+    feedbackElId = 'upload-status';
+  }
   const feedbackEl = document.getElementById(feedbackElId);
   if (feedbackEl) {
     feedbackEl.innerHTML = alert('success', `Record for <strong>${record.full_name}</strong> saved successfully!`);
@@ -1610,9 +1620,32 @@ function resetCapture() {
   
   if (state.captureMode === 'manual') {
     document.getElementById('card-upload').style.display = 'none';
+    document.getElementById('card-barcode-upload').style.display = 'none';
     document.getElementById('card-form').style.display = 'block';
+  } else if (state.captureMode === 'barcode') {
+    document.getElementById('card-upload').style.display = 'none';
+    document.getElementById('card-barcode-upload').style.display = 'block';
+    document.getElementById('card-form').style.display = 'none';
+    // Reset the barcode zone thumbnail
+    const barcodeInner = document.getElementById('zone-barcode-inner');
+    if (barcodeInner) {
+      barcodeInner.innerHTML = `
+        <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>
+        <p class="uzone-label">Back of ID</p>
+        <small>Barcode scan — direct read, no OCR</small>
+      `;
+    }
+    const zoneBarcode = document.getElementById('zone-barcode');
+    if (zoneBarcode) zoneBarcode.classList.remove('loaded');
+    const bgi = document.getElementById('input-barcode-gallery');
+    const bci = document.getElementById('input-barcode-camera');
+    if (bgi) bgi.value = '';
+    if (bci) bci.value = '';
+    const barcodeStatus = document.getElementById('barcode-upload-status');
+    if (barcodeStatus) barcodeStatus.innerHTML = '';
   } else {
     document.getElementById('card-upload').style.display = 'block';
+    document.getElementById('card-barcode-upload').style.display = 'none';
     document.getElementById('card-form').style.display = 'none';
   }
   
@@ -1646,19 +1679,22 @@ function resetCapture() {
 function setCaptureMode(mode) {
   state.captureMode = mode;
   localStorage.setItem('nssf_capture_mode', mode);
-  
-  const scanBtn = document.getElementById('mode-scan-btn');
-  const manualBtn = document.getElementById('mode-manual-btn');
-  
+
+  const scanBtn    = document.getElementById('mode-scan-btn');
+  const barcodeBtn = document.getElementById('mode-barcode-btn');
+  const manualBtn  = document.getElementById('mode-manual-btn');
+
+  [scanBtn, barcodeBtn, manualBtn].forEach(b => b && b.classList.remove('active'));
+
   if (mode === 'scan') {
     if (scanBtn) scanBtn.classList.add('active');
-    if (manualBtn) manualBtn.classList.remove('active');
-    resetCapture();
+  } else if (mode === 'barcode') {
+    if (barcodeBtn) barcodeBtn.classList.add('active');
   } else {
-    if (scanBtn) scanBtn.classList.remove('active');
     if (manualBtn) manualBtn.classList.add('active');
-    resetCapture();
   }
+
+  resetCapture();
 }
 
 // ─── Records table ────────────────────────────
@@ -1837,34 +1873,15 @@ function setupInstallAppButton() {
 
 // ─── Barcode-only capture path ─────────────────
 //
-// Completely independent of runOCR / proceedWithWarpedImages.
-// The raw image goes directly to UgIdParser.parseCardImage() with no
-// preprocessing: no warp, no resize, no B/W toggle, no OpenCV, no Tesseract.
-// This replicates the Python reference module (ug_id_parser_reference.py)
-// running standalone.
-
+// showBarcodeSourceSelector() is kept as a window export to avoid breaking
+// any cached page that might call it. It now just switches to the barcode
+// section — the old modal is gone.
 function showBarcodeSourceSelector() {
-  const modal = document.getElementById('source-selector-modal');
-  const sideName = document.getElementById('source-side-name');
-  const btnCamera = document.getElementById('btn-source-camera');
-  const btnGallery = document.getElementById('btn-source-gallery');
-  const btnCancel = document.getElementById('btn-source-cancel');
-
-  if (!modal) return;
-  sideName.textContent = 'back (barcode)';
-  modal.style.display = 'flex';
-
-  btnCamera.onclick = () => {
-    modal.style.display = 'none';
-    document.getElementById('input-barcode-camera').click();
-  };
-  btnGallery.onclick = () => {
-    modal.style.display = 'none';
-    document.getElementById('input-barcode-gallery').click();
-  };
-  btnCancel.onclick = () => {
-    modal.style.display = 'none';
-  };
+  // The source-selector modal is no longer used for the barcode flow.
+  // The 'Scan Barcode' button now calls setCaptureMode('barcode') directly.
+  // This function is kept only so any service-worker-cached page that calls
+  // it doesn't throw a ReferenceError.
+  setCaptureMode('barcode');
 }
 
 /**
@@ -1886,9 +1903,9 @@ async function runBarcodeCapture(file) {
     return;
   }
 
-  // Show a lightweight spinner using the same progress card as OCR.
+  // Show the shared progress spinner; hide the barcode upload section.
   state.ocr.running = true;
-  document.getElementById('card-upload').style.display = 'none';
+  document.getElementById('card-barcode-upload').style.display = 'none';
   document.getElementById('card-form').style.display = 'none';
   document.getElementById('card-progress').style.display = 'block';
   setProgress(10, 'Loading image…', 'Preparing barcode scan');
@@ -1901,7 +1918,20 @@ async function runBarcodeCapture(file) {
     // direct reference to the raw JPEG bytes, preserving native camera resolution.
     const img = await loadImageNative(file);
     console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight} (file: ${(file.size/1024).toFixed(0)} KB), passing directly to UgIdParser`);
-    setProgress(30, 'Scanning PDF417 barcode…', 'Decoding symbol — no preprocessing applied');
+
+    // Show a thumbnail in the upload zone — mirroring handleFile() on the Scan ID section.
+    // A fresh object URL is created because loadImageNative() revokes its own on img.onload.
+    const thumbUrl = URL.createObjectURL(file);
+    const barcodeZoneInner = document.getElementById('zone-barcode-inner');
+    if (barcodeZoneInner) {
+      barcodeZoneInner.innerHTML =
+        `<img src="${thumbUrl}" class="uzone-img" alt="back of ID" onload="URL.revokeObjectURL(this.src)">` +
+        `<div class="uzone-success-label">\u2713 Back loaded</div>`;
+    }
+    const barcodeZone = document.getElementById('zone-barcode');
+    if (barcodeZone) barcodeZone.classList.add('loaded');
+
+    setProgress(30, 'Scanning PDF417 barcode\u2026', 'Decoding symbol \u2014 no preprocessing applied');
 
     // ── The ONLY call that matters in this entire path ──────────────────
     // Raw HTMLImageElement → UgIdParser.parseCardImage.
@@ -1976,11 +2006,13 @@ async function runBarcodeCapture(file) {
                 :                'Unexpected Error';
 
     document.getElementById('card-progress').style.display = 'none';
-    document.getElementById('card-upload').style.display = 'block';
-    document.getElementById('form-alert').innerHTML = alert('error',
-      `<strong>${label}</strong><br>${err.message}`);
-    document.getElementById('card-form').style.display = 'block';
-    document.getElementById('btn-extract').disabled = !state.files.front;
+    document.getElementById('card-barcode-upload').style.display = 'block';
+    // Show the error in the status div inside the barcode section.
+    const barcodeStatus = document.getElementById('barcode-upload-status');
+    if (barcodeStatus) {
+      barcodeStatus.innerHTML = alert('error', `<strong>${label}</strong><br>${err.message}`);
+    }
+    document.getElementById('btn-extract').disabled = true;
   } finally {
     state.ocr.running = false;
     // Clear the file input so the same file can be re-selected after a failure.
