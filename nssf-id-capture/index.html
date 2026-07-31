@@ -176,18 +176,16 @@
         <div class="upload-pair" style="justify-content: center;">
           <!-- Single upload slot: back of card only -->
           <div class="upload-slot">
-            <div class="uzone" id="zone-barcode" onclick="document.getElementById('input-barcode-gallery').click()">
+            <div class="uzone" id="zone-barcode" onclick="showBarcodeSourceSelector()">
               <div class="uzone-inner" id="zone-barcode-inner">
                 <svg class="uzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h3M7 11h5"/></svg>
                 <p class="uzone-label">Back of ID</p>
                 <small>Barcode scan — direct read, no OCR</small>
               </div>
             </div>
-            <!-- Gallery input: opens file picker (no modal) -->
             <input type="file" id="input-barcode-gallery" accept="image/*" hidden onchange="runBarcodeCapture(this.files[0])">
-            <!-- Camera input: opens native camera directly -->
             <input type="file" id="input-barcode-camera" accept="image/*" capture="environment" hidden onchange="runBarcodeCapture(this.files[0])">
-            <button class="btn btn-outline btn-sm upload-btn" onclick="document.getElementById('input-barcode-gallery').click()">
+            <button class="btn btn-outline btn-sm upload-btn" onclick="showBarcodeSourceSelector()">
               Choose / Take Photo
             </button>
           </div>

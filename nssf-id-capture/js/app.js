@@ -1871,17 +1871,41 @@ function setupInstallAppButton() {
   });
 }
 
-// ─── Barcode-only capture path ─────────────────
-//
-// showBarcodeSourceSelector() is kept as a window export to avoid breaking
-// any cached page that might call it. It now just switches to the barcode
-// section — the old modal is gone.
+// showBarcodeSourceSelector() — shows the same Camera / Gallery modal used by
+// Scan ID, but wires the buttons to the barcode-specific file inputs
+// (input-barcode-camera / input-barcode-gallery). Those inputs fire
+// runBarcodeCapture() on change, which goes straight to ZXing PDF417 scanning
+// with zero OCR involvement.
 function showBarcodeSourceSelector() {
-  // The source-selector modal is no longer used for the barcode flow.
-  // The 'Scan Barcode' button now calls setCaptureMode('barcode') directly.
-  // This function is kept only so any service-worker-cached page that calls
-  // it doesn't throw a ReferenceError.
-  setCaptureMode('barcode');
+  // Make sure we're in barcode mode (sets up the barcode section if not already)
+  if (state.captureMode !== 'barcode') {
+    setCaptureMode('barcode');
+  }
+
+  const modal = document.getElementById('source-selector-modal');
+  const sideName = document.getElementById('source-side-name');
+  const btnCamera = document.getElementById('btn-source-camera');
+  const btnGallery = document.getElementById('btn-source-gallery');
+  const btnCancel = document.getElementById('btn-source-cancel');
+
+  if (!modal || !sideName || !btnCamera || !btnGallery || !btnCancel) return;
+
+  sideName.textContent = 'back (barcode)';
+  modal.style.display = 'flex';
+
+  btnCamera.onclick = () => {
+    modal.style.display = 'none';
+    document.getElementById('input-barcode-camera').click();
+  };
+
+  btnGallery.onclick = () => {
+    modal.style.display = 'none';
+    document.getElementById('input-barcode-gallery').click();
+  };
+
+  btnCancel.onclick = () => {
+    modal.style.display = 'none';
+  };
 }
 
 /**
