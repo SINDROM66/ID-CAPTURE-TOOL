@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>End-to-End PDF417 Barcode Verification</title>
+  <script src="js/vendor/zxing.umd.min.js"></script>
+  <script src="js/tesseract.min.js"></script>
+  <script src="js/ug-id-parser.js"></script>
+  <script src="js/parser.js"></script>
+</head>
+<body>
+  <h1>E2E Barcode Verification (Strict Mode)</h1>
+  <div id="status">Running tests...</div>
+  <pre id="log" style="background:#f4f4f4; padding:10px; border:1px solid #ccc;"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    // Helper to rotate a canvas by an angle (90, 180, 270)
+    function rotateCanvas(canvas, degrees) {
+      if (degrees === 0) return canvas;
+      const out = document.createElement('canvas');
+      const ctx = out.getContext('2d');
+      if (degrees === 90 || degrees === 270) {
+        out.width = canvas.height;
+        out.height = canvas.width;
+      } else {
+        out.width = canvas.width;
+        out.height = canvas.height;
+      }
+      ctx.translate(out.width / 2, out.height / 2);
+      ctx.rotate((degrees * Math.PI) / 180);
+      ctx.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+      return out;
+    }
+
+    async function scanImageWithRotations(img) {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = img.naturalWidth || img.width;
+      tempCanvas.height = img.naturalHeight || img.height;
+      tempCanvas.getContext('2d').drawImage(img, 0, 0);
+      
+      for (const angle of [0, 90, 180, 270]) {
+        const rotated = rotateCanvas(tempCanvas, angle);
+        try {
+          const res = await UgIdParser.scanCardImage(rotated);
+          return { rotated, angle };
+        } catch(e) {
+          // try next angle
+        }
+      }
+      throw new UgIdParser.ScanError('No valid barcode found at any rotation (0, 90, 180, 270 degrees).');
+    }
+
+    // Measure barcode using the project's own findSymbolBbox projection logic
+    function runMeasureSymbol(img) {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = img.naturalWidth || img.width;
+      tempCanvas.height = img.naturalHeight || img.height;
+      tempCanvas.getContext('2d').drawImage(img, 0, 0);
+
+      // findSymbolBbox constants
+      const DARK_THRESHOLD = 110;
+      const MIN_ROW_INK = 50;
+      const MIN_COL_INK = 5;
+      const QUIET_ZONE_PX = 20;
+
+      const { width, height } = tempCanvas;
+      const ctx = tempCanvas.getContext('2d');
+      const data = ctx.getImageData(0, 0, width, height).data;
+
+      const ink = new Uint8Array(width * height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const grey = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        ink[p] = grey < DARK_THRESHOLD ? 1 : 0;
+      }
+
+      const rowInk = new Int32Array(height);
+      for (let y = 0; y < height; y++) {
+        let sum = 0;
+        const base = y * width;
+        for (let x = 0; x < width; x++) sum += ink[base + x];
+        rowInk[y] = sum;
+      }
+
+      const rows = [];
+      for (let y = 0; y < height; y++) if (rowInk[y] > MIN_ROW_INK) rows.push(y);
+      if (!rows.length) return null;
+
+      const bands = [];
+      let start = rows[0];
+      let prev = rows[0];
+      for (let i = 1; i < rows.length; i++) {
+        const y = rows[i];
+        if (y - prev > 15) {
+          bands.push([start, prev]);
+          start = y;
+        }
+        prev = y;
+      }
+      bands.push([start, prev]);
+
+      let top = bands[0][0];
+      let bottom = bands[0][1];
+      let bestSum = -1;
+      for (const [s, e] of bands) {
+        let sum = 0;
+        for (let y = s; y <= e; y++) sum += rowInk[y];
+        if (sum > bestSum) {
+          bestSum = sum;
+          top = s;
+          bottom = e;
+        }
+      }
+
+      const colInk = new Int32Array(width);
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let y = top; y <= bottom; y++) sum += ink[y * width + x];
+        colInk[x] = sum;
+      }
+
+      const cols = [];
+      for (let x = 0; x < width; x++) if (colInk[x] > MIN_COL_INK) cols.push(x);
+      if (!cols.length) return null;
+
+      const left = Math.max(0, cols[0] - QUIET_ZONE_PX);
+      const right = Math.min(width, cols[cols.length - 1] + QUIET_ZONE_PX);
+      const bbox_top = Math.max(0, top - QUIET_ZONE_PX);
+      const bbox_bottom = Math.min(height, bottom + QUIET_ZONE_PX);
+
+      const symbol_width = cols[cols.length - 1] - cols[0];
+      const ppm = symbol_width / 204;
+      return {
+        bbox: [left, bbox_top, right, bbox_bottom],
+        symbol_width,
+        ppm
+      };
+    }
+
+    async function run() {
+      try {
+        log('--- STARTING VERIFICATION ---');
+
+        // Helper to load image as HTMLImageElement
+        const loadImage = (src) => new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = (e) => reject(new Error('Failed to load image: ' + src));
+          img.src = src;
+        });
+
+        log('Loading test images...');
+        const img1 = await loadImage('test/test_front.jpg');
+        const img2 = await loadImage('test/test_back.jpg');
+        log(`Loaded Front Image: ${img1.width}x${img1.height}`);
+        log(`Loaded Back Image: ${img2.width}x${img2.height}`);
+
+        // ─── 1. Band inventory (replaces single-band measurement) ───
+        log('\n--- 1. All-Bands Inventory (findAllSymbolBboxes) ---');
+        // Draw image onto a canvas so we can call findAllSymbolBboxes on it
+        const backCanvas1 = document.createElement('canvas');
+        backCanvas1.width  = img2.width;
+        backCanvas1.height = img2.height;
+        backCanvas1.getContext('2d').drawImage(img2, 0, 0);
+        const allBands = UgIdParser.findAllSymbolBboxes(backCanvas1);
+        log(`Total ink bands detected: ${allBands.length}`);
+        allBands.forEach((bbox, i) => {
+          const [l, t, r, b] = bbox;
+          const bboxH = b - t;
+          const bboxW = r - l;
+          log(`  Band ${i+1}: bbox=[${l},${t},${r},${b}]  size=${bboxW}x${bboxH}  ppm(204-mod)=${((bboxW - 40) / 204).toFixed(3)}`);
+        });
+        // Also show the legacy single-band result for comparison
+        const singleBbox = UgIdParser.findSymbolBbox(backCanvas1);
+        if (singleBbox) {
+          const sw = (singleBbox[2] - singleBbox[0]) - 40;
+          log(`  [Legacy single band]: bbox=[${singleBbox.join(',')}]  symbol_width=${sw}px  ppm=${(sw/204).toFixed(3)}`);
+        }
+
+        // ─── 2. Back-of-card barcode scan (production path, debug=true) ───
+        log('\n--- 2. Back-of-card barcode scan ---');
+        // Intercept console.debug so the production scan loop's trace appears in the log
+        const origDebug = console.debug;
+        console.debug = (...args) => { log('[scan] ' + args.join(' ')); origDebug(...args); };
+        let barcodeRecord = null;
+        let barcodeReadSucceeded = false;
+        try {
+          // Pass the raw img2 directly — this is the production-code path:
+          // UgIdParser internally calls findAllSymbolBboxes + rotation loop.
+          barcodeRecord = await UgIdParser.parseCardImage(img2, { debug: true });
+          barcodeReadSucceeded = true;
+          log('RESULT: Step 2 (Barcode scan) PASS');
+          log('Decoded CardRecord fields:\n' + UgIdParser.render(barcodeRecord));
+        } catch(e) {
+          log(`RESULT: Step 2 (Barcode scan) FAILED. Error: ${e.message}`);
+        } finally {
+          console.debug = origDebug;
+        }
+
+        // ─── 3. Back MRZ OCR Path ───
+        log('\n--- 3. Back MRZ OCR Path ---');
+        let backData = {};
+        let ocrText = '';
+        try {
+          log('Initialising Tesseract worker...');
+          const worker = await Tesseract.createWorker('eng', 1, {
+            corePath:   'js/tesseract-core-simd-lstm.wasm.js',
+            langPath:   'lang-data',
+            cachePath:  'lang-data',
+            gzip:       true
+          });
+          await worker.setParameters({
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+            tessedit_pageseg_mode: '6'
+          });
+
+          log('Drawing back image stretched to 856x540 canvas...');
+          const backCanvas = document.createElement('canvas');
+          backCanvas.width = 856;
+          backCanvas.height = 540;
+          const ctx = backCanvas.getContext('2d');
+          ctx.drawImage(img2, 0, 0, 856, 540);
+
+          log('Running Tesseract recognize...');
+          const { data: { text } } = await worker.recognize(backCanvas);
+          ocrText = text;
+          log('Raw Back OCR Text:\n' + ocrText);
+
+          backData = parseBack(ocrText);
+          backData.source = 'ocr';
+          log('Parsed Back OCR Fields:\n' + JSON.stringify(backData, null, 2));
+
+          // ── Fix 1 verification: confirm dataQualityFlag is now populated ──
+          // Use a simulated front with the correct values the card's face
+          // actually carries, matching what front OCR would have produced.
+          const fix1FrontData = {
+            surname:     'LYOMOKI',
+            given_names: 'SAMUEL JUNIOR',
+            dob:         '13.09.2000',
+            nin:         '',           // front OCR typically fails NIN extraction
+            sex:         '',
+            nationality: 'UGA'
+          };
+          const fix1Merged = mergeAndApplyMrzBackfill({ front: fix1FrontData, back: backData });
+          log('\n[FIX 1 VERIFICATION] mergeAndApplyMrzBackfill with source=ocr:');
+          log('  dob used:             ' + fix1Merged.dob);
+          log('  nin used:             ' + fix1Merged.nin);
+          log('  sex used:             ' + fix1Merged.sex);
+          log('  dataQualityFlag:      ' + JSON.stringify(fix1Merged.dataQualityFlag));
+          if (fix1Merged.dataQualityFlag && fix1Merged.dataQualityFlag.includes('MRZ-OCR override')) {
+            log('[FIX 1] PASS — dataQualityFlag is set and contains the MRZ-OCR override prefix.');
+          } else {
+            log('[FIX 1] FAIL — dataQualityFlag was not set as expected.');
+          }
+        } catch(e) {
+          log(`RESULT: Step 3 (Back MRZ OCR) FAILED. Error: ${e.message}`);
+        }
+
+        // ─── 4. Front-only baseline ───
+        log('\n--- 4. Front-only baseline ---');
+        const mockFrontText = `
+          REPUBLIC OF UGANDA
+          NATIONAL ID CARD
+          LYOMOKI
+          SAMUEL JUNIOR
+          UGA M 13.09.2000
+          CM000351093UXF 019307246
+          21.01.2029
+        `;
+        const frontParsed = parseFront(mockFrontText);
+        log('Front parsed OCR data: ' + JSON.stringify(frontParsed, null, 2));
+
+        const mergedFrontOnly = mergeAndApplyMrzBackfill({ front: frontParsed, back: {} });
+        log('Merged Front-only result: ' + JSON.stringify(mergedFrontOnly, null, 2));
+        log(`dataQualityFlag value: "${mergedFrontOnly.dataQualityFlag}" (type: ${typeof mergedFrontOnly.dataQualityFlag})`);
+        
+        // ─── 5. Precedence and reconciliation (only if barcode succeeds) ───
+        log('\n--- 5. Precedence and reconciliation ---');
+        if (barcodeReadSucceeded && barcodeRecord) {
+          const formatDateToDisplay = (d) => {
+            if (!d) return '';
+            const day = String(d.getUTCDate()).padStart(2, '0');
+            const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const year = d.getUTCFullYear();
+            return `${day}.${month}.${year}`;
+          };
+
+          const mappedBarcodeBack = {
+            surname:     barcodeRecord.surname || '',
+            given_names: barcodeRecord.givenName || '',
+            other_name:  barcodeRecord.otherName || '',
+            sex:         barcodeRecord.sex || '',
+            dob:         formatDateToDisplay(barcodeRecord.dateOfBirth),
+            nin:         barcodeRecord.nin || '',
+            expiry:      formatDateToDisplay(barcodeRecord.expiryDate),
+            issue_date:  formatDateToDisplay(barcodeRecord.issueDate),
+            card_no:     barcodeRecord.cardNumber || '',
+            source:      'barcode',
+            barcodeWarnings: barcodeRecord.warnings || []
+          };
+
+          log('Reconciling matching front & barcode...');
+          const mergedMatch = mergeAndApplyMrzBackfill({ front: frontParsed, back: mappedBarcodeBack });
+          log('Merged matching dataQualityFlag: ' + JSON.stringify(mergedMatch.dataQualityFlag));
+
+          log('Reconciling disagreeing front & barcode...');
+          const frontDisagreement = Object.assign({}, frontParsed, { surname: 'LYOMOKI_BAD_OCR' });
+          const mergedMismatch = mergeAndApplyMrzBackfill({ front: frontDisagreement, back: mappedBarcodeBack });
+          log('Merged mismatch Surname value: ' + mergedMismatch.surname);
+          log('Merged mismatch dataQualityFlag: ' + JSON.stringify(mergedMismatch.dataQualityFlag));
+        } else {
+          log('RESULT: Step 5 (Precedence and reconciliation) BLOCKED because barcode scan failed.');
+        }
+
+        // ─── 6. Actual saved-record JSON ───
+        log('\n--- 6. Actual saved-record JSON ---');
+        
+        // Build actual backData structure representing this run
+        let finalBack = {};
+        if (barcodeReadSucceeded && barcodeRecord) {
+          const formatDateToDisplay = (d) => {
+            if (!d) return '';
+            const day = String(d.getUTCDate()).padStart(2, '0');
+            const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const year = d.getUTCFullYear();
+            return `${day}.${month}.${year}`;
+          };
+          finalBack = {
+            surname:     barcodeRecord.surname || '',
+            given_names: barcodeRecord.givenName || '',
+            other_name:  barcodeRecord.otherName || '',
+            sex:         barcodeRecord.sex || '',
+            dob:         formatDateToDisplay(barcodeRecord.dateOfBirth),
+            nin:         barcodeRecord.nin || '',
+            expiry:      formatDateToDisplay(barcodeRecord.expiryDate),
+            issue_date:  formatDateToDisplay(barcodeRecord.issueDate),
+            card_no:     barcodeRecord.cardNumber || '',
+            source:      'barcode',
+            barcodeWarnings: barcodeRecord.warnings || []
+          };
+        } else {
+          finalBack = backData; // Use Tesseract back OCR data
+        }
+
+        const mergedFinal = mergeAndApplyMrzBackfill({ front: frontParsed, back: finalBack });
+        
+        const actualSavedRecord = {
+          sn: 1,
+          surname: mergedFinal.surname || '',
+          given_names: mergedFinal.given_names || '',
+          sex: mergedFinal.sex || '',
+          dob: mergedFinal.dob || '',
+          nin: mergedFinal.nin || '',
+          data_quality_flag: mergedFinal.dataQualityFlag || ''
+        };
+        log('Actual saved record JSON that would land in IndexedDB:\n' + JSON.stringify(actualSavedRecord, null, 2));
+
+        // ─── REPORTING BACK ───
+        document.getElementById('status').textContent = 'Verification completed!';
+        
+        // POST results to server
+        fetch('http://localhost:59954/results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ log: logEl.textContent })
+        });
+      } catch(e) {
+        log('CRITICAL ERROR: ' + e.message + '\n' + e.stack);
+        document.getElementById('status').textContent = 'Verification failed: ' + e.message;
+        fetch('http://localhost:59954/results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ error: e.message, log: logEl.textContent })
+        });
+      }
+    }
+
+    window.onload = run;
+  </script>
+</body>
+</html>

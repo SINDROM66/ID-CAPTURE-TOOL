@@ -1,0 +1,222 @@
+--- STARTING VERIFICATION ---
+Loading test images...
+Loaded Front Image: 576x1024
+Loaded Back Image: 576x1024
+
+--- 1. All-Bands Inventory (findAllSymbolBboxes) ---
+Total ink bands detected: 4
+  Band 1: bbox=[0,694,576,1024]  size=576x330  ppm(204-mod)=2.627
+  Band 2: bbox=[69,334,547,470]  size=478x136  ppm(204-mod)=2.147
+  Band 3: bbox=[63,532,534,639]  size=471x107  ppm(204-mod)=2.113
+  Band 4: bbox=[76,451,269,538]  size=193x87  ppm(204-mod)=0.750
+  [Legacy single band]: bbox=[0,694,576,1024]  symbol_width=536px  ppm=2.627
+
+--- 2. Back-of-card barcode scan ---
+[scan] findAllSymbolBboxes: 4 band(s) found, trying each before full frame
+[scan] band 1 / grey x2 / 0°: no read
+[scan] band 1 / grey x2 / 90°: no read
+[scan] band 1 / grey x2 / 180°: no read
+[scan] band 1 / grey x2 / 270°: no read
+[scan] band 1 / autocontrast x2 / 0°: no read
+[scan] band 1 / autocontrast x2 / 90°: no read
+[scan] band 1 / autocontrast x2 / 180°: no read
+[scan] band 1 / autocontrast x2 / 270°: no read
+[scan] band 1 / grey x1 / 0°: no read
+[scan] band 1 / grey x1 / 90°: no read
+[scan] band 1 / grey x1 / 180°: no read
+[scan] band 1 / grey x1 / 270°: no read
+[scan] band 1 / autocontrast x1 / 0°: no read
+[scan] band 1 / autocontrast x1 / 90°: no read
+[scan] band 1 / autocontrast x1 / 180°: no read
+[scan] band 1 / autocontrast x1 / 270°: no read
+[scan] band 1 / grey x3 / 0°: no read
+[scan] band 1 / grey x3 / 90°: no read
+[scan] band 1 / grey x3 / 180°: no read
+[scan] band 1 / grey x3 / 270°: no read
+[scan] band 1 / autocontrast x3 / 0°: no read
+[scan] band 1 / autocontrast x3 / 90°: no read
+[scan] band 1 / autocontrast x3 / 180°: no read
+[scan] band 1 / autocontrast x3 / 270°: no read
+[scan] band 2 / grey x2 / 0°: no read
+[scan] band 2 / grey x2 / 90°: no read
+[scan] band 2 / grey x2 / 180°: no read
+[scan] band 2 / grey x2 / 270°: no read
+[scan] band 2 / autocontrast x2 / 0°: no read
+[scan] band 2 / autocontrast x2 / 90°: no read
+[scan] band 2 / autocontrast x2 / 180°: no read
+[scan] band 2 / autocontrast x2 / 270°: no read
+[scan] band 2 / grey x1 / 0°: no read
+[scan] band 2 / grey x1 / 90°: no read
+[scan] band 2 / grey x1 / 180°: no read
+[scan] band 2 / grey x1 / 270°: no read
+[scan] band 2 / autocontrast x1 / 0°: no read
+[scan] band 2 / autocontrast x1 / 90°: no read
+[scan] band 2 / autocontrast x1 / 180°: no read
+[scan] band 2 / autocontrast x1 / 270°: no read
+[scan] band 2 / grey x3 / 0°: no read
+[scan] band 2 / grey x3 / 90°: no read
+[scan] band 2 / grey x3 / 180°: no read
+[scan] band 2 / grey x3 / 270°: no read
+[scan] band 2 / autocontrast x3 / 0°: no read
+[scan] band 2 / autocontrast x3 / 90°: no read
+[scan] band 2 / autocontrast x3 / 180°: no read
+[scan] band 2 / autocontrast x3 / 270°: no read
+[scan] band 3 / grey x2 / 0°: no read
+[scan] band 3 / grey x2 / 90°: no read
+[scan] band 3 / grey x2 / 180°: no read
+[scan] band 3 / grey x2 / 270°: no read
+[scan] band 3 / autocontrast x2 / 0°: no read
+[scan] band 3 / autocontrast x2 / 90°: no read
+[scan] band 3 / autocontrast x2 / 180°: no read
+[scan] band 3 / autocontrast x2 / 270°: no read
+[scan] band 3 / grey x1 / 0°: no read
+[scan] band 3 / grey x1 / 90°: no read
+[scan] band 3 / grey x1 / 180°: no read
+[scan] band 3 / grey x1 / 270°: no read
+[scan] band 3 / autocontrast x1 / 0°: no read
+[scan] band 3 / autocontrast x1 / 90°: no read
+[scan] band 3 / autocontrast x1 / 180°: no read
+[scan] band 3 / autocontrast x1 / 270°: no read
+[scan] band 3 / grey x3 / 0°: no read
+[scan] band 3 / grey x3 / 90°: no read
+[scan] band 3 / grey x3 / 180°: no read
+[scan] band 3 / grey x3 / 270°: no read
+[scan] band 3 / autocontrast x3 / 0°: no read
+[scan] band 3 / autocontrast x3 / 90°: no read
+[scan] band 3 / autocontrast x3 / 180°: no read
+[scan] band 3 / autocontrast x3 / 270°: no read
+[scan] band 4 / grey x2 / 0°: no read
+[scan] band 4 / grey x2 / 90°: no read
+[scan] band 4 / grey x2 / 180°: no read
+[scan] band 4 / grey x2 / 270°: no read
+[scan] band 4 / autocontrast x2 / 0°: no read
+[scan] band 4 / autocontrast x2 / 90°: no read
+[scan] band 4 / autocontrast x2 / 180°: no read
+[scan] band 4 / autocontrast x2 / 270°: no read
+[scan] band 4 / grey x1 / 0°: no read
+[scan] band 4 / grey x1 / 90°: no read
+[scan] band 4 / grey x1 / 180°: no read
+[scan] band 4 / grey x1 / 270°: no read
+[scan] band 4 / autocontrast x1 / 0°: no read
+[scan] band 4 / autocontrast x1 / 90°: no read
+[scan] band 4 / autocontrast x1 / 180°: no read
+[scan] band 4 / autocontrast x1 / 270°: no read
+[scan] band 4 / grey x3 / 0°: no read
+[scan] band 4 / grey x3 / 90°: no read
+[scan] band 4 / grey x3 / 180°: no read
+[scan] band 4 / grey x3 / 270°: no read
+[scan] band 4 / autocontrast x3 / 0°: no read
+[scan] band 4 / autocontrast x3 / 90°: no read
+[scan] band 4 / autocontrast x3 / 180°: no read
+[scan] band 4 / autocontrast x3 / 270°: no read
+[scan] full frame / grey x2 / 0°: no read
+[scan] full frame / grey x2 / 90°: no read
+[scan] full frame / grey x2 / 180°: no read
+[scan] full frame / grey x2 / 270°: no read
+[scan] full frame / autocontrast x2 / 0°: no read
+[scan] full frame / autocontrast x2 / 90°: no read
+[scan] full frame / autocontrast x2 / 180°: no read
+[scan] full frame / autocontrast x2 / 270°: no read
+[scan] full frame / grey x1 / 0°: no read
+[scan] full frame / grey x1 / 90°: no read
+[scan] full frame / grey x1 / 180°: no read
+[scan] full frame / grey x1 / 270°: no read
+[scan] full frame / autocontrast x1 / 0°: no read
+[scan] full frame / autocontrast x1 / 90°: no read
+[scan] full frame / autocontrast x1 / 180°: no read
+[scan] full frame / autocontrast x1 / 270°: no read
+[scan] full frame / grey x3 / 0°: no read
+[scan] full frame / grey x3 / 90°: no read
+[scan] full frame / grey x3 / 180°: no read
+[scan] full frame / grey x3 / 270°: no read
+[scan] full frame / autocontrast x3 / 0°: no read
+[scan] full frame / autocontrast x3 / 90°: no read
+[scan] full frame / autocontrast x3 / 180°: no read
+[scan] full frame / autocontrast x3 / 270°: no read
+RESULT: Step 2 (Barcode scan) FAILED. Error: no valid PDF417 payload found. Re-shoot the card: fill the frame, hold the sensor parallel to the card, diffuse light to kill glare on the laminate, and keep the whole symbol including quiet zones inside the frame.
+
+--- 3. Back MRZ OCR Path ---
+Initialising Tesseract worker...
+Drawing back image stretched to 856x540 canvas...
+Running Tesseract recognize...
+Raw Back OCR Text:
+EEE       possi = ||
+| SSR atts        Ste anr any
+E          EEE ER ERE Ete
+I ERR i PRR EE leah
+IPUGAO1IS3072462CMOOOS51023UXFE <
+00051 =2omMZ2901215UGA120121 <<<<<7
+CY OmMOKI c<SAMUEL<JUNIOR<=<<<=<<<-<
+
+Parsed Back OCR Fields:
+{
+  "dob": "12.05.2000",
+  "sex": "M",
+  "nin": "CM000551023UXF",
+  "card_no": "011530724",
+  "surname": "CYOMMOKIC",
+  "given_names": "SAMUEL JUNIOR",
+  "nationality": "UGA",
+  "village": "EEE POSSI II",
+  "parish": "I SSR ATTS STE ANR ANY",
+  "sub_county": "E EEE ER ERE ETE",
+  "county": "I ERR I PRR EE LEAH",
+  "source": "ocr"
+}
+
+[FIX 1 VERIFICATION] mergeAndApplyMrzBackfill with source=ocr:
+  dob used:             12.05.2000
+  nin used:             CM000551023UXF
+  sex used:             M
+  dataQualityFlag:      "MRZ-OCR override: DOB mismatch: front=13.09.2000 vs back-MRZ=12.05.2000 — MRZ value used, please verify against physical card"
+[FIX 1] PASS — dataQualityFlag is set and contains the MRZ-OCR override prefix.
+
+--- 4. Front-only baseline ---
+Front parsed OCR data: {
+  "dob": "13.09.2000",
+  "expiry": "21.01.2029",
+  "nin": "AMUELJUNIORUGA",
+  "surname": "LYOMOKI",
+  "given_names": "SAMUEL JUNIOR",
+  "nationality": "UGA"
+}
+Merged Front-only result: {
+  "surname": "LYOMOKI",
+  "given_names": "SAMUEL JUNIOR",
+  "sex": "",
+  "dob": "13.09.2000",
+  "nin": "",
+  "expiry": "21.01.2029",
+  "card_no": "",
+  "nationality": "UGA",
+  "village": "",
+  "parish": "",
+  "sub_county": "",
+  "county": "",
+  "district": "",
+  "confidence": {
+    "nin": "low",
+    "dob": "medium",
+    "sex": "low",
+    "surname": "medium",
+    "given_names": "medium"
+  },
+  "dataQualityFlag": "",
+  "barcodeWarnings": []
+}
+dataQualityFlag value: "" (type: string)
+
+--- 5. Precedence and reconciliation ---
+RESULT: Step 5 (Precedence and reconciliation) BLOCKED because barcode scan failed.
+
+--- 6. Actual saved-record JSON ---
+Actual saved record JSON that would land in IndexedDB:
+{
+  "sn": 1,
+  "surname": "LYOMOKI",
+  "given_names": "SAMUEL JUNIOR",
+  "sex": "M",
+  "dob": "12.05.2000",
+  "nin": "CM000551023UXF",
+  "data_quality_flag": "MRZ-OCR override: DOB mismatch: front=13.09.2000 vs back-MRZ=12.05.2000 — MRZ value used, please verify against physical card"
+}

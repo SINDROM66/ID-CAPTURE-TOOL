@@ -544,6 +544,87 @@
   }
 
   /**
+   * Return bounding boxes for ALL ink bands, sorted by total ink sum
+   * descending (densest first).
+   *
+   * The reference module picks a single band (the densest). That breaks when
+   * a secondary ink feature — the MRZ on the Uganda ID back — has higher
+   * aggregate ink than the barcode band (because the MRZ runs the full card
+   * width while the barcode occupies only the right half). This function
+   * preserves the same projection algorithm but lets the caller iterate over
+   * all candidate bands so ZXing's structural rejection (looksLikeCardPayload)
+   * acts as the tiebreaker instead of raw ink density.
+   *
+   * findSymbolBbox is kept unchanged because it is part of the public API and
+   * the test harness uses it directly.
+   *
+   * Returns [] if no ink bands are found.
+   */
+  function findAllSymbolBboxes(canvas) {
+    const { width, height } = canvas;
+    const ctx = canvas.getContext("2d");
+    const data = ctx.getImageData(0, 0, width, height).data;
+
+    const ink = new Uint8Array(width * height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const grey = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      ink[p] = grey < DARK_THRESHOLD ? 1 : 0;
+    }
+
+    const rowInk = new Int32Array(height);
+    for (let y = 0; y < height; y++) {
+      let sum = 0;
+      const base = y * width;
+      for (let x = 0; x < width; x++) sum += ink[base + x];
+      rowInk[y] = sum;
+    }
+
+    const rows = [];
+    for (let y = 0; y < height; y++) if (rowInk[y] > MIN_ROW_INK) rows.push(y);
+    if (!rows.length) return [];
+
+    const bands = [];
+    let start = rows[0];
+    let prev  = rows[0];
+    for (let i = 1; i < rows.length; i++) {
+      const y = rows[i];
+      if (y - prev > 15) { bands.push([start, prev]); start = y; }
+      prev = y;
+    }
+    bands.push([start, prev]);
+
+    // Sort bands by total ink descending so the densest is tried first,
+    // matching the reference module's preference order.
+    bands.sort((a, b) => {
+      let sa = 0, sb = 0;
+      for (let y = a[0]; y <= a[1]; y++) sa += rowInk[y];
+      for (let y = b[0]; y <= b[1]; y++) sb += rowInk[y];
+      return sb - sa;
+    });
+
+    const bboxes = [];
+    for (const [top, bottom] of bands) {
+      const colInk = new Int32Array(width);
+      for (let x = 0; x < width; x++) {
+        let sum = 0;
+        for (let y = top; y <= bottom; y++) sum += ink[y * width + x];
+        colInk[x] = sum;
+      }
+      const cols = [];
+      for (let x = 0; x < width; x++) if (colInk[x] > MIN_COL_INK) cols.push(x);
+      if (!cols.length) continue;
+
+      bboxes.push([
+        Math.max(0, cols[0] - QUIET_ZONE_PX),
+        Math.max(0, top - QUIET_ZONE_PX),
+        Math.min(width, cols[cols.length - 1] + QUIET_ZONE_PX),
+        Math.min(height, bottom + QUIET_ZONE_PX),
+      ]);
+    }
+    return bboxes;
+  }
+
+  /**
    * Cheap structural check used to reject corrupt reads.
    *
    * A phone photo of a laminated card can produce a read the decoder
@@ -644,6 +725,38 @@
     return out;
   }
 
+  /**
+   * Return a new canvas rotated 90° clockwise.
+   *
+   * PDF417 is a horizontal symbol: a phone held portrait over a
+   * landscape ID card delivers the barcode at 90° relative to the
+   * sensor rows. The Python reference module handles this via
+   * zxingcpp's try_rotate=True; here we replicate that by rotating
+   * the canvas before calling readBarcode.
+   */
+  function rotateCanvas90(canvas) {
+    const out = document.createElement("canvas");
+    out.width  = canvas.height;
+    out.height = canvas.width;
+    const ctx = out.getContext("2d");
+    ctx.translate(out.width, 0);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(canvas, 0, 0);
+    return out;
+  }
+
+  /**
+   * Yield (label, canvas) for 0°, 90°, 180°, 270° — matching the
+   * reference module's try_rotate=True iteration order.
+   */
+  function* rotations(canvas) {
+    let c = canvas;
+    for (const deg of [0, 90, 180, 270]) {
+      yield [`${deg}°`, c];
+      c = rotateCanvas90(c);
+    }
+  }
+
   function* variants(cropCanvas) {
     const grey = toGreyscale(cropCanvas);
     for (const factor of SCALE_LADDER) {
@@ -678,26 +791,40 @@
     requireZXing();
     const { canvas, label } = await toCanvas(source);
 
-    const bbox = findSymbolBbox(canvas);
-    const regions = [];
-    if (bbox) regions.push(["cropped", cropCanvas(canvas, bbox)]);
-    regions.push(["full frame", canvas]); // fallback if localisation missed
+    // Build region list: all detected bands (densest first) then full frame.
+    //
+    // The reference module picks one band (max ink sum). That fails on the
+    // Uganda ID back because the MRZ band has higher aggregate ink than the
+    // barcode band. We now try every band in density order, letting
+    // looksLikeCardPayload act as the structural tiebreaker. The full-frame
+    // fallback is preserved as the final option as in the reference module.
+    const bboxes = findAllSymbolBboxes(canvas);
+    const regions = bboxes.map((bbox, i) => [`band ${i + 1}`, cropCanvas(canvas, bbox)]);
+    regions.push(["full frame", canvas]); // always last, matches reference module
+    if (debug) {
+      console.debug(`findAllSymbolBboxes: ${bboxes.length} band(s) found, trying each before full frame`);
+    }
 
     for (const [regionLabel, region] of regions) {
       for (const [variantLabel, candidate] of variants(region)) {
-        const text = readBarcode(candidate);
-        if (text === null) {
-          if (debug) console.debug(`${regionLabel} / ${variantLabel}: no read`);
-          continue;
-        }
-        if (looksLikeCardPayload(text)) {
-          if (debug) console.debug(`${regionLabel} / ${variantLabel}: OK, ${text.length} chars`);
-          return { payload: text, source: label };
-        }
-        if (debug) {
-          console.debug(
-            `${regionLabel} / ${variantLabel}: decoded ${text.length} chars but FAILED validation (corrupt read)`
-          );
+        // Try all 4 orientations per variant — mirrors zxingcpp try_rotate=True.
+        // Portrait phone over landscape card = barcode arrives at 90°; without
+        // this loop @zxing/library PDF417Reader sees it at a single orientation.
+        for (const [rotLabel, rotated] of rotations(candidate)) {
+          const text = readBarcode(rotated);
+          if (text === null) {
+            if (debug) console.debug(`${regionLabel} / ${variantLabel} / ${rotLabel}: no read`);
+            continue;
+          }
+          if (looksLikeCardPayload(text)) {
+            if (debug) console.debug(`${regionLabel} / ${variantLabel} / ${rotLabel}: OK, ${text.length} chars`);
+            return { payload: text, source: label };
+          }
+          if (debug) {
+            console.debug(
+              `${regionLabel} / ${variantLabel} / ${rotLabel}: decoded ${text.length} chars but FAILED validation (corrupt read)`
+            );
+          }
         }
       }
     }
@@ -789,6 +916,7 @@
     parseCard,
     // scanning (async — all touch the camera/canvas pipeline)
     findSymbolBbox,
+    findAllSymbolBboxes,
     looksLikeCardPayload,
     scanCardImage,
     parseCardImage,

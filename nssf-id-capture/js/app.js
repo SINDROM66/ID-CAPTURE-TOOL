@@ -1268,10 +1268,17 @@ async function runOCR() {
 }
 
 /**
- * Runs the OCR pipeline strictly on the warped 856x540 canvases
+ * Runs the OCR pipeline on the warped 856×540 canvases for Tesseract.
+ * This is a pure OCR path: front-of-card text extraction + optional
+ * back-of-card MRZ extraction. There is NO barcode scanning here.
+ * Barcode scanning is handled entirely by the standalone runBarcodeCapture()
+ * function, which routes the raw image directly to UgIdParser.
+ *
+ * @param {HTMLCanvasElement|null} frontCanvas  856×540 warped front image
+ * @param {HTMLCanvasElement|null} backCanvas   856×540 warped back image (MRZ OCR only)
  */
 async function proceedWithWarpedImages(frontCanvas, backCanvas) {
-  // Step 5 - Pre-flight size validation
+  // Pre-flight size validation
   if (frontCanvas) {
     if (frontCanvas.width !== 856 || frontCanvas.height !== 540) {
       console.error('Front canvas passed to OCR is not 856x540 — aborting');
@@ -1332,56 +1339,28 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
     state.layouts.back = backLayout;
     console.log('Back card layout:', backLayout);
 
-    setProgress(55, 'Scanning PDF417 barcode on back of ID…', 'Decoding symbol');
-    try {
-      const record = await UgIdParser.parseCardImage(backCanvas, { debug: false });
-      console.log('PDF417 Barcode scanned successfully!', record);
+    // Back-of-card is OCR-only in this pipeline. Barcode scanning is handled
+    // by the dedicated runBarcodeCapture() path, which feeds the raw image
+    // (no warp, no resize) directly to UgIdParser. Do not add barcode attempts
+    // here — this warp canvas will always fail the PDF417 decoder.
+    setProgress(55, 'Reading back of ID card (MRZ)…', 'Running Tesseract worker');
 
-      const formatDateToDisplay = (d) => {
-        if (!d || !(d instanceof Date)) return '';
-        const day = String(d.getUTCDate()).padStart(2, '0');
-        const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-        const year = d.getUTCFullYear();
-        return `${day}.${month}.${year}`;
-      };
+    const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
+    await worker.setParameters({
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+      tessedit_pageseg_mode: '6'
+    });
 
-      backData = {
-        surname:     record.surname || '',
-        given_names: record.givenName || '',
-        other_name:  record.otherName || '',
-        sex:         record.sex || '',
-        dob:         formatDateToDisplay(record.dateOfBirth),
-        nin:         record.nin || '',
-        expiry:      formatDateToDisplay(record.expiryDate),
-        issue_date:  formatDateToDisplay(record.issueDate),
-        card_no:     record.cardNumber || '',
-        source:      'barcode',
-        barcodeWarnings: record.warnings || []
-      };
+    const preprocessed = preprocessROI(backCanvas, 1.6, 'full_back');
+    const result = await worker.recognize(preprocessed.toDataURL('image/png'));
+    await worker.terminate();
 
-      rawBack = `=== PDF417 BARCODE READ ===\n${UgIdParser.render(record)}`;
-    } catch (err) {
-      console.warn('PDF417 Barcode scan failed, falling back to OCR:', err.message);
-      
-      setProgress(60, 'Reading entire back of ID card (OCR fallback)…', 'Running Tesseract worker');
+    const fullBackText = (result.data.text || '').trim();
+    backData = parseBack(fullBackText);
+    backData.source = 'ocr';
 
-      const worker = await Tesseract.createWorker('eng', 1, getTesseractOptions());
-      await worker.setParameters({
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-        tessedit_pageseg_mode: '6'
-      });
-
-      const preprocessed = preprocessROI(backCanvas, 1.6, 'full_back');
-      const result = await worker.recognize(preprocessed.toDataURL('image/png'));
-      await worker.terminate();
-
-      const fullBackText = (result.data.text || '').trim();
-      backData = parseBack(fullBackText);
-      backData.source = 'ocr';
-
-      rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
-    }
+    rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
   }
 
   setProgress(95, 'Finalising…', 'Building form');
@@ -1823,6 +1802,160 @@ function setupInstallAppButton() {
     btn.style.display = 'none';
   });
 }
+
+// ─── Barcode-only capture path ─────────────────
+//
+// Completely independent of runOCR / proceedWithWarpedImages.
+// The raw image goes directly to UgIdParser.parseCardImage() with no
+// preprocessing: no warp, no resize, no B/W toggle, no OpenCV, no Tesseract.
+// This replicates the Python reference module (ug_id_parser_reference.py)
+// running standalone.
+
+function showBarcodeSourceSelector() {
+  const modal = document.getElementById('source-selector-modal');
+  const sideName = document.getElementById('source-side-name');
+  const btnCamera = document.getElementById('btn-source-camera');
+  const btnGallery = document.getElementById('btn-source-gallery');
+  const btnCancel = document.getElementById('btn-source-cancel');
+
+  if (!modal) return;
+  sideName.textContent = 'back (barcode)';
+  modal.style.display = 'flex';
+
+  btnCamera.onclick = () => {
+    modal.style.display = 'none';
+    document.getElementById('input-barcode-camera').click();
+  };
+  btnGallery.onclick = () => {
+    modal.style.display = 'none';
+    document.getElementById('input-barcode-gallery').click();
+  };
+  btnCancel.onclick = () => {
+    modal.style.display = 'none';
+  };
+}
+
+/**
+ * Execute the barcode-only scan flow.
+ *
+ * The file goes: File → loadImage() → UgIdParser.parseCardImage() with ZERO
+ * preprocessing in between. No warpCard, no getWarpedCanvasOrFallback, no
+ * preprocessROI, no canvas resize, no Tesseract involvement at any point.
+ *
+ * On success: maps CardRecord → form fields using the same fillForm() used by
+ *   the OCR pipeline, shows the standard review banner.
+ * On failure: displays the verbatim ScanError / CardParseError message and
+ *   stops. Does NOT fall back to OCR — the user explicitly chose this path.
+ */
+async function runBarcodeCapture(file) {
+  if (!file) return;
+  if (state.ocr.running) {
+    document.getElementById('form-alert').innerHTML = alert('warning', 'An extraction is already in progress. Please wait for it to finish.');
+    return;
+  }
+
+  // Show a lightweight spinner using the same progress card as OCR.
+  state.ocr.running = true;
+  document.getElementById('card-upload').style.display = 'none';
+  document.getElementById('card-form').style.display = 'none';
+  document.getElementById('card-progress').style.display = 'block';
+  setProgress(10, 'Loading image…', 'Preparing barcode scan');
+
+  try {
+    // ── Load the raw image ────────────────────────────────────────────
+    const img = await loadImage(file);
+    console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight}, passing directly to UgIdParser`);
+    setProgress(30, 'Scanning PDF417 barcode…', 'Decoding symbol — no preprocessing applied');
+
+    // ── The ONLY call that matters in this entire path ──────────────────
+    // Raw HTMLImageElement → UgIdParser.parseCardImage.
+    // UgIdParser.toCanvas() converts it internally (needed for pixel access);
+    // no other transformation is applied from our side.
+    const record = await UgIdParser.parseCardImage(img, { debug: false });
+
+    console.log('Barcode scan SUCCESS:', record);
+    setProgress(90, 'Barcode decoded — filling form…', '');
+    await sleep(100);
+
+    // ── Map CardRecord → the same flat object fillForm() expects ───────
+    const fmt = (d) => {
+      if (!d || !(d instanceof Date)) return '';
+      return [
+        String(d.getUTCDate()).padStart(2, '0'),
+        String(d.getUTCMonth() + 1).padStart(2, '0'),
+        d.getUTCFullYear()
+      ].join('.');
+    };
+
+    const mapped = {
+      surname:     record.surname     || '',
+      given_names: record.givenName   || '',
+      other_name:  record.otherName   || '',
+      sex:         record.sex         || '',
+      dob:         fmt(record.dateOfBirth),
+      nin:         record.nin         || '',
+      expiry:      fmt(record.expiryDate),
+      issue_date:  fmt(record.issueDate),
+      card_no:     record.cardNumber  || '',
+      nationality: '',           // not stored in the barcode
+      dataQualityFlag: '',
+      barcodeWarnings: record.warnings || []
+    };
+
+    // Reuse the exact same field-population function used by the OCR path.
+    fillForm(mapped);
+    applyConfidenceBorders({});
+
+    // Show raw barcode text in the collapsible block for verification.
+    const rawBlock = document.getElementById('raw-block');
+    rawBlock.style.display = 'block';
+    document.getElementById('raw-front-text').textContent = '';
+    document.getElementById('raw-back-text').textContent = '=== BARCODE (PDF417) ===\n' + UgIdParser.render(record);
+
+    // Banner: identical wording to the OCR success banner.
+    let alertHtml = alert('warning',
+      'Data extracted from barcode — please <strong>review every field</strong> carefully before saving.');
+    if (record.warnings && record.warnings.length > 0) {
+      alertHtml += '<br>' + alert('warning',
+        `<strong>Barcode Warnings:</strong><br>${record.warnings.join('<br>')}`);
+    }
+    document.getElementById('form-alert').innerHTML = alertHtml;
+
+    state.dataQualityFlag = '';
+    state.barcodeWarnings = record.warnings || [];
+
+    setProgress(100, 'Done', '');
+    document.getElementById('card-progress').style.display = 'none';
+    document.getElementById('card-form').style.display = 'block';
+    document.getElementById('btn-extract').disabled = false;
+
+  } catch (err) {
+    // ScanError and CardParseError messages are surfaced verbatim, per spec.
+    // No fallback to OCR — this was an explicit user choice.
+    console.error('Barcode capture failed:', err);
+    const isScanError = err instanceof UgIdParser.ScanError;
+    const isParseError = err instanceof UgIdParser.CardParseError;
+    const label = isScanError  ? 'Barcode Not Found'
+                : isParseError ? 'Barcode Decoded but Could Not Be Parsed'
+                :                'Unexpected Error';
+
+    document.getElementById('card-progress').style.display = 'none';
+    document.getElementById('card-upload').style.display = 'block';
+    document.getElementById('form-alert').innerHTML = alert('error',
+      `<strong>${label}</strong><br>${err.message}`);
+    document.getElementById('card-form').style.display = 'block';
+    document.getElementById('btn-extract').disabled = !state.files.front;
+  } finally {
+    state.ocr.running = false;
+    // Clear the file input so the same file can be re-selected after a failure.
+    const gi = document.getElementById('input-barcode-gallery');
+    const ci = document.getElementById('input-barcode-camera');
+    if (gi) gi.value = '';
+    if (ci) ci.value = '';
+  }
+}
+window.showBarcodeSourceSelector = showBarcodeSourceSelector;
+window.runBarcodeCapture = runBarcodeCapture;
 
 // ─── Photo Source Selector Modal ──────────────
 function showSourceSelector(side) {

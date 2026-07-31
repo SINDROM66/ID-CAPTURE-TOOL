@@ -1117,7 +1117,38 @@ function mergeAndApplyMrzBackfill(merged) {
     }
   }
 
+  // ── front-vs-MRZ-OCR mismatch detection (back.source === 'ocr') ──────────
+  // Override behaviour is unchanged — MRZ still wins via reconcile*.
+  // This block only makes the disagreement visible in dataQualityFlag so
+  // that a silent corruption (e.g. garbled OCR overwriting a correct front
+  // value) surfaces to field staff rather than being silently swallowed.
+  //
+  // Comparison is gated on both values passing format validation: if only
+  // one side is valid, reconcile* would already have chosen the valid one
+  // without a real mismatch, so there is nothing meaningful to flag.
+  if (back.source === 'ocr') {
+    const mrzOcrMismatches = [];
 
+    const vFrontDob = validateDob(front.dob);
+    const vMrzDob   = validateDob(mrz.dob);
+    if (vFrontDob && vMrzDob && vFrontDob !== vMrzDob) {
+      mrzOcrMismatches.push(
+        `DOB mismatch: front=${vFrontDob} vs back-MRZ=${vMrzDob} \u2014 MRZ value used, please verify against physical card`
+      );
+    }
+
+    const vFrontNin = validateNin(front.nin);
+    const vMrzNin   = validateNin(mrz.nin);
+    if (vFrontNin && vMrzNin && vFrontNin !== vMrzNin) {
+      mrzOcrMismatches.push(
+        `NIN mismatch: front=${vFrontNin} vs back-MRZ=${vMrzNin} \u2014 MRZ value used, please verify against physical card`
+      );
+    }
+
+    if (mrzOcrMismatches.length > 0) {
+      dataQualityFlag = 'MRZ-OCR override: ' + mrzOcrMismatches.join('; ');
+    }
+  }
 
   let out = {
     surname:     '',
