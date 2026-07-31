@@ -1034,6 +1034,30 @@ function handleFile(side, input) {
   updateUploadStatus();
 }
 
+function handleBarcodeFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  state.files.barcode = file;
+
+  const url = URL.createObjectURL(file);
+  const zone = document.getElementById('zone-barcode');
+  const inner = document.getElementById('zone-barcode-inner');
+
+  if (inner) {
+    inner.innerHTML = `
+      <img src="${url}" class="uzone-img" alt="back of ID">
+      <div class="uzone-success-label">✓ Back loaded</div>
+    `;
+  }
+  if (zone) zone.classList.add('loaded');
+
+  const btn = document.getElementById('btn-extract-barcode');
+  if (btn) btn.disabled = false;
+  
+  const statusEl = document.getElementById('barcode-upload-status');
+  if (statusEl) statusEl.innerHTML = '';
+}
+
 function updateUploadStatus() {
   const hF = !!state.files.front;
   const hB = !!state.files.back;
@@ -1253,8 +1277,12 @@ async function runOCR() {
   state.scanMode = !bwToggle || bwToggle.checked;
 
   document.getElementById('btn-extract').disabled = true;
+  document.getElementById('card-upload').style.display = 'none';
   document.getElementById('card-progress').style.display = 'block';
   document.getElementById('card-form').style.display = 'none';
+
+  const titleEl = document.getElementById('progress-title-text');
+  if (titleEl) titleEl.textContent = 'Running OCR — Please Wait';
 
   // Make sure debug container is hidden at start of a new run
   const debugContainer = document.getElementById('debug-warp-container');
@@ -1584,7 +1612,7 @@ function saveRecord() {
 
 // ─── Reset capture flow ───────────────────────
 function resetCapture() {
-  state.files = { front: null, back: null };
+  state.files = { front: null, back: null, barcode: null };
   state.dataQualityFlag = '';
   state.barcodeWarnings = [];
 
@@ -1650,6 +1678,9 @@ function resetCapture() {
   }
   
   document.getElementById('btn-extract').disabled = true;
+  const extractBarcodeBtn = document.getElementById('btn-extract-barcode');
+  if (extractBarcodeBtn) extractBarcodeBtn.disabled = true;
+
   document.getElementById('raw-block').style.display = 'none';
   document.getElementById('raw-front-text').textContent = '';
   document.getElementById('raw-back-text').textContent = '';
@@ -1920,7 +1951,8 @@ function showBarcodeSourceSelector() {
  * On failure: displays the verbatim ScanError / CardParseError message and
  *   stops. Does NOT fall back to OCR — the user explicitly chose this path.
  */
-async function runBarcodeCapture(file) {
+async function runBarcodeCapture() {
+  const file = state.files.barcode;
   if (!file) return;
   if (state.ocr.running) {
     document.getElementById('form-alert').innerHTML = alert('warning', 'An extraction is already in progress. Please wait for it to finish.');
@@ -1932,6 +1964,10 @@ async function runBarcodeCapture(file) {
   document.getElementById('card-barcode-upload').style.display = 'none';
   document.getElementById('card-form').style.display = 'none';
   document.getElementById('card-progress').style.display = 'block';
+  
+  const titleEl = document.getElementById('progress-title-text');
+  if (titleEl) titleEl.textContent = 'Scanning Barcode — Please Wait';
+
   setProgress(10, 'Loading image…', 'Preparing barcode scan');
 
   try {
@@ -1942,18 +1978,6 @@ async function runBarcodeCapture(file) {
     // direct reference to the raw JPEG bytes, preserving native camera resolution.
     const img = await loadImageNative(file);
     console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight} (file: ${(file.size/1024).toFixed(0)} KB), passing directly to UgIdParser`);
-
-    // Show a thumbnail in the upload zone — mirroring handleFile() on the Scan ID section.
-    // A fresh object URL is created because loadImageNative() revokes its own on img.onload.
-    const thumbUrl = URL.createObjectURL(file);
-    const barcodeZoneInner = document.getElementById('zone-barcode-inner');
-    if (barcodeZoneInner) {
-      barcodeZoneInner.innerHTML =
-        `<img src="${thumbUrl}" class="uzone-img" alt="back of ID" onload="URL.revokeObjectURL(this.src)">` +
-        `<div class="uzone-success-label">\u2713 Back loaded</div>`;
-    }
-    const barcodeZone = document.getElementById('zone-barcode');
-    if (barcodeZone) barcodeZone.classList.add('loaded');
 
     setProgress(30, 'Scanning PDF417 barcode\u2026', 'Decoding symbol \u2014 no preprocessing applied');
 

@@ -183,8 +183,8 @@
                 <small>Barcode scan — direct read, no OCR</small>
               </div>
             </div>
-            <input type="file" id="input-barcode-gallery" accept="image/*" hidden onchange="runBarcodeCapture(this.files[0])">
-            <input type="file" id="input-barcode-camera" accept="image/*" capture="environment" hidden onchange="runBarcodeCapture(this.files[0])">
+            <input type="file" id="input-barcode-gallery" accept="image/*" hidden onchange="handleBarcodeFile(this)">
+            <input type="file" id="input-barcode-camera" accept="image/*" capture="environment" hidden onchange="handleBarcodeFile(this)">
             <button class="btn btn-outline btn-sm upload-btn" onclick="showBarcodeSourceSelector()">
               Choose / Take Photo
             </button>
@@ -193,16 +193,27 @@
 
         <div class="hint" style="margin-top: 16px;">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          Photographs the barcode on the back of the card and decodes it directly — no OCR, no perspective warp. The scan runs automatically as soon as the photo is selected. Hold the back of the card flat and fill the frame for best results.
+          Photographs the barcode on the back of the card and decodes it directly — no OCR, no perspective warp. Hold the back of the card flat and fill the frame for best results.
         </div>
 
         <div id="barcode-upload-status"></div>
+
+        <div class="action-row">
+          <button class="btn btn-primary" id="btn-extract-barcode" onclick="runBarcodeCapture()" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h6l3 9H6M21 3h-6l-3 9h6M6 21h12M12 12v9"/></svg>
+            Extract Data
+          </button>
+          <button class="btn btn-ghost" onclick="resetCapture()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            Reset
+          </button>
+        </div>
       </div>
 
       <div class="card" id="card-progress" style="display:none">
         <h2 class="card-title">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-          Running OCR — Please Wait
+          <span id="progress-title-text">Running OCR — Please Wait</span>
         </h2>
         <div class="progress-wrap">
           <div class="progress-label" id="prog-label">Initialising…</div>
