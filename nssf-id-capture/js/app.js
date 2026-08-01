@@ -856,6 +856,26 @@ function loadImageNative(file) {
   });
 }
 
+function capBarcodeImage(source, maxLongEdge = 1800) {
+  const width = source.naturalWidth || source.width;
+  const height = source.naturalHeight || source.height;
+  const longEdge = Math.max(width, height);
+  if (longEdge <= maxLongEdge) {
+    return source;
+  }
+
+  const scale = maxLongEdge / longEdge;
+  const targetWidth = Math.round(width * scale);
+  const targetHeight = Math.round(height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
+  return canvas;
+}
+
 function alignCardToStandard(img) {
   // Standard canvas: 1000×1000 virtual units (ROI coords are already normalized 0–1)
   // Physical Uganda NID ratio: 85.6mm × 53.98mm = 1.586:1
@@ -1056,12 +1076,6 @@ function handleBarcodeFile(input) {
 
   const statusEl = document.getElementById('barcode-upload-status');
   if (statusEl) statusEl.innerHTML = '';
-
-  // Start the dedicated barcode-only path immediately after the user picks a
-  // camera/gallery source, so the standalone flow is fully automatic.
-  if (state.captureMode === 'barcode') {
-    void runBarcodeCapture();
-  }
 }
 
 function updateUploadStatus() {
@@ -1908,43 +1922,17 @@ function setupInstallAppButton() {
   });
 }
 
-// showBarcodeSourceSelector() — shows the same Camera / Gallery modal used by
-// Scan ID, but wires the buttons to the barcode-specific file inputs
+// showBarcodeSourceSelector() — reuses the shared Camera / Gallery modal used by
+// Scan ID, but targets the barcode-specific file inputs
 // (input-barcode-camera / input-barcode-gallery). Those inputs fire
 // runBarcodeCapture() on change, which goes straight to ZXing PDF417 scanning
 // with zero OCR involvement.
 function showBarcodeSourceSelector() {
-  // Make sure we're in barcode mode (sets up the barcode section if not already)
   if (state.captureMode !== 'barcode') {
     setCaptureMode('barcode');
   }
 
-  const modal = document.getElementById('source-selector-modal');
-  const sideName = document.getElementById('source-side-name');
-  const btnCamera = document.getElementById('btn-source-camera');
-  const btnGallery = document.getElementById('btn-source-gallery');
-  const btnCancel = document.getElementById('btn-source-cancel');
-
-  if (!modal || !sideName || !btnCamera || !btnGallery || !btnCancel) return;
-
-  sideName.textContent = 'back (barcode)';
-  modal.style.display = 'flex';
-
-  btnCamera.onclick = () => {
-    modal.style.display = 'none';
-    const input = document.getElementById('input-barcode-camera');
-    if (input) input.click();
-  };
-
-  btnGallery.onclick = () => {
-    modal.style.display = 'none';
-    const input = document.getElementById('input-barcode-gallery');
-    if (input) input.click();
-  };
-
-  btnCancel.onclick = () => {
-    modal.style.display = 'none';
-  };
+  showSourceSelector('barcode');
 }
 
 /**
@@ -1984,16 +1972,18 @@ async function runBarcodeCapture() {
     // readAsDataURL decodes the JPEG into a base64 bitmap, which Android WebView
     // silently downsamples to ~900x1600. createObjectURL gives the browser a
     // direct reference to the raw JPEG bytes, preserving native camera resolution.
-    const img = await loadImageNative(file);
-    console.log(`Barcode capture: raw image ${img.naturalWidth}x${img.naturalHeight} (file: ${(file.size/1024).toFixed(0)} KB), passing directly to UgIdParser`);
+    const rawImage = await loadImageNative(file);
+    const barcodeSource = capBarcodeImage(rawImage, 1800);
+    const sourceWidth = rawImage.naturalWidth || rawImage.width;
+    const sourceHeight = rawImage.naturalHeight || rawImage.height;
+    const processedWidth = barcodeSource.width;
+    const processedHeight = barcodeSource.height;
+    console.log(`Barcode capture: raw image ${sourceWidth}x${sourceHeight} (file: ${(file.size/1024).toFixed(0)} KB); processing at ${processedWidth}x${processedHeight}`);
 
     setProgress(30, 'Scanning PDF417 barcode\u2026', 'Decoding symbol \u2014 no preprocessing applied');
 
     // ── The ONLY call that matters in this entire path ──────────────────
-    // Raw HTMLImageElement → UgIdParser.parseCardImage.
-    // UgIdParser.toCanvas() converts it internally (needed for pixel access);
-    // no other transformation is applied from our side.
-    const record = await UgIdParser.parseCardImage(img, { debug: false });
+    const record = await UgIdParser.parseCardImage(barcodeSource, { debug: false });
 
     console.log('Barcode scan SUCCESS:', record);
     setProgress(90, 'Barcode decoded — filling form…', '');
@@ -2048,7 +2038,7 @@ async function runBarcodeCapture() {
     setProgress(100, 'Done', '');
     document.getElementById('card-progress').style.display = 'none';
     document.getElementById('card-form').style.display = 'block';
-    document.getElementById('btn-extract').disabled = false;
+    document.getElementById('btn-extract-barcode').disabled = false;
 
   } catch (err) {
     // ScanError and CardParseError messages are surfaced verbatim, per spec.
@@ -2067,7 +2057,7 @@ async function runBarcodeCapture() {
     if (barcodeStatus) {
       barcodeStatus.innerHTML = alert('error', `<strong>${label}</strong><br>${err.message}`);
     }
-    document.getElementById('btn-extract').disabled = true;
+    document.getElementById('btn-extract-barcode').disabled = true;
   } finally {
     state.ocr.running = false;
     // Clear the file input so the same file can be re-selected after a failure.
