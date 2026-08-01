@@ -768,8 +768,9 @@
 
   function readBarcode(canvas) {
     const { width, height } = canvas;
-    const imageData = canvas.getContext("2d").getImageData(0, 0, width, height).data;
-    const luminanceSource = new global.ZXing.RGBLuminanceSource(imageData, width, height);
+
+
+    const luminanceSource = new global.ZXing.HTMLCanvasElementLuminanceSource(canvas);
     const binarizer = new global.ZXing.HybridBinarizer(luminanceSource);
     const bitmap = new global.ZXing.BinaryBitmap(binarizer);
     const reader = new global.ZXing.PDF417Reader();
@@ -799,6 +800,11 @@
     // looksLikeCardPayload act as the structural tiebreaker. The full-frame
     // fallback is preserved as the final option as in the reference module.
     const bboxes = findAllSymbolBboxes(canvas);
+    if (debug) {
+      try {
+        console.debug(`findAllSymbolBboxes bboxes: ${JSON.stringify(bboxes)}`);
+      } catch (e) { console.debug('findAllSymbolBboxes bboxes: (unserializable)'); }
+    }
     const regions = bboxes.map((bbox, i) => [`band ${i + 1}`, cropCanvas(canvas, bbox)]);
     regions.push(["full frame", canvas]); // always last, matches reference module
     if (debug) {
