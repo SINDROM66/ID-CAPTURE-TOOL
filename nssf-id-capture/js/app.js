@@ -1053,9 +1053,15 @@ function handleBarcodeFile(input) {
 
   const btn = document.getElementById('btn-extract-barcode');
   if (btn) btn.disabled = false;
-  
+
   const statusEl = document.getElementById('barcode-upload-status');
   if (statusEl) statusEl.innerHTML = '';
+
+  // Start the dedicated barcode-only path immediately after the user picks a
+  // camera/gallery source, so the standalone flow is fully automatic.
+  if (state.captureMode === 'barcode') {
+    void runBarcodeCapture();
+  }
 }
 
 function updateUploadStatus() {
@@ -1926,12 +1932,14 @@ function showBarcodeSourceSelector() {
 
   btnCamera.onclick = () => {
     modal.style.display = 'none';
-    document.getElementById('input-barcode-camera').click();
+    const input = document.getElementById('input-barcode-camera');
+    if (input) input.click();
   };
 
   btnGallery.onclick = () => {
     modal.style.display = 'none';
-    document.getElementById('input-barcode-gallery').click();
+    const input = document.getElementById('input-barcode-gallery');
+    if (input) input.click();
   };
 
   btnCancel.onclick = () => {
@@ -2019,6 +2027,8 @@ async function runBarcodeCapture() {
     // Reuse the exact same field-population function used by the OCR path.
     fillForm(mapped);
     applyConfidenceBorders({});
+    state.dataQualityFlag = '';
+    state.barcodeWarnings = record.warnings || [];
 
     // Show raw barcode text in the collapsible block for verification.
     const rawBlock = document.getElementById('raw-block');
@@ -2034,9 +2044,6 @@ async function runBarcodeCapture() {
         `<strong>Barcode Warnings:</strong><br>${record.warnings.join('<br>')}`);
     }
     document.getElementById('form-alert').innerHTML = alertHtml;
-
-    state.dataQualityFlag = '';
-    state.barcodeWarnings = record.warnings || [];
 
     setProgress(100, 'Done', '');
     document.getElementById('card-progress').style.display = 'none';
