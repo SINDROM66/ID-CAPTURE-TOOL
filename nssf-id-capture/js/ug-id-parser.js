@@ -835,3 +835,4 @@ if (typeof module !== 'undefined' && module.exports) {
   window.looksLikeMrzBlock = looksLikeMrzBlock;
   window.scoreBackExtraction = scoreBackExtraction;
 }
+
