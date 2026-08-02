@@ -377,14 +377,24 @@ function parseFront(raw) {
   // NIN (uses DOB for prefix Year of Birth reconciliation if available)
   const words = up.split(/[\s|]+/).filter(Boolean);
   let nin = '';
-  const compactNinMatch = up.replace(/[^A-Z0-9]/g, '').match(/[CAP][MF][A-Z0-9]{12}/);
-  if (compactNinMatch) {
-    nin = validateNin(compactNinMatch[0], data.dob) || compactNinMatch[0];
+  
+  // Search for the NIN structural pattern ANYWHERE in the raw OCR text
+  // We use word boundaries \b and the strict pattern to avoid matching random noise.
+  const ninMatches = up.match(/\b[CAP][MF]\d{2}[A-Z0-9]{10}\b/gi) || [];
+  for (const matchStr of ninMatches) {
+    const candidate = validateNin(matchStr, data.dob);
+    if (candidate) { 
+      nin = candidate; 
+      break; 
+    }
   }
-  for (const w of words) {
-    if (nin) break;
-    const candidate = validateNin(w, data.dob);
-    if (candidate) { nin = candidate; break; }
+
+  // Fallback to words just in case
+  if (!nin) {
+    for (const w of words) {
+      const candidate = validateNin(w, data.dob);
+      if (candidate) { nin = candidate; break; }
+    }
   }
   if (nin) data.nin = nin;
 
@@ -442,25 +452,11 @@ function parseFront(raw) {
     if (cleanToks.length) data.given_names = cleanToks.slice(0, 3).join(' ');
   }
 
-  // Fallback: scan lines (when labeled positions not found)
-  if (!data.surname || !data.given_names) {
-    const candidates = lines
-      .filter(l => !l.includes('<'))
-      .map(normalizeNameStrict)
-      .filter(v => v && v.length >= 3)
-      // Apply same quality gates as the labeled path:
-      // - reject NIN-like CF/CM fragments (CMALWK, CFBH etc.)
-      // - reject all-consonant tokens (NNSNIONS etc.)
-      // - full name must have at least one vowel
-      .filter(v => !/^C[MF][A-Z0-9]{1,8}$/.test(v.split(/\s+/)[0]))
-      .filter(v => isPersonNameStrict(v));
-
-    if (!data.surname && candidates.length >= 1) data.surname = candidates[0].split(/\s+/)[0];
-    if (!data.given_names && candidates.length >= 2) data.given_names = candidates.slice(1, 2).join(' ');
-  }
+  // Removed positional fallback for names (Bug 2 Fix)
+  // We strictly rely on labeled fields to avoid shifting data into wrong fields.
 
   // Card Number
-  const cardNoMatch = up.match(/\b(?:CARD|CARD\s*NO|CA)\s*[:\s]*([A-Z]{0,2}[0-9]{8,12})\b/i) ||
+  const cardNoMatch = up.match(/\b(?:CARD|CARD\s*NO|CA)[\s\S]{0,40}?\b([A-Z]{0,2}[0-9]{8,12})\b/i) ||
                       up.match(/\b(CA[0-9]{8,12})\b/i);
   if (cardNoMatch) data.card_no = cardNoMatch[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
 
