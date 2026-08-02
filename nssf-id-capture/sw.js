@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nssf-id-capture-v32';
+const CACHE_NAME = 'nssf-id-capture-v33';
 const ASSETS = [
   './',
   './index.html',
@@ -59,3 +59,4 @@ self.addEventListener('fetch', (e) => {
     })
   );
 });
+
