@@ -521,7 +521,25 @@ function parseBack(raw) {
   // MRZ parsing (only if it looks like there are MRZ lines present)
   const chevronCount = (up.match(/</g) || []).length;
   if (chevronCount > 5 || up.includes('IDUGA') || up.includes('IDTST')) {
-    Object.assign(data, parseMRZ(up));
+    const mrzLines = extractMRZ(raw);
+    if (mrzLines) {
+      const parsed = parseMRZ(mrzLines);
+      
+      if (parsed.dateOfBirth) {
+         const parts = parsed.dateOfBirth.split('-');
+         if (parts.length === 3) {
+             data.dob = parts[2] + '.' + parts[1] + '.' + parts[0]; 
+         }
+      }
+      if (parsed.sex === 'Male') data.sex = 'M';
+      else if (parsed.sex === 'Female') data.sex = 'F';
+      else data.sex = parsed.sex;
+      
+      if (parsed.nin) data.nin = parsed.nin;
+      if (parsed.surname) data.surname = parsed.surname;
+      if (parsed.givenName) data.given_names = parsed.givenName;
+      if (parsed.nationality) data.nationality = parsed.nationality;
+    }
   }
 
   // Location extraction
@@ -653,673 +671,99 @@ function parseBack(raw) {
   return data;
 }
 
-// ─── MRZ parser ───────────────────────────────────────────────────────────
-// Accepts raw OCR text containing MRZ lines.
-function parseMRZ(text) {
-  const data = {};
-  const norm = normalizeOCRText(text);
-  const rawLines = norm.split('\n').map(l => l.trim()).filter(Boolean);
 
-  const lines = rawLines
-    .map(l => l.replace(/\s+/g, '').replace(/[^A-Z0-9<]/g, ''))
-    .filter(l => l.length >= 15);
-
-  function fixN(str) {
-    return str.replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5').replace(/B/g,'8');
-  }
-
-  // 1. Scoring-based line classification
-  let line1 = '', line2 = '', line3 = '';
-  const scoredLines = lines.map(l => {
-    const numDigits = (l.match(/\d/g) || []).length;
+// --- MRZ parser -----------------------------------------------------------
+/**
+ * Extracts the 3 lines of the TD1 MRZ from raw OCR text.
+ */
+function extractMRZ(text) {
+    const lines = text.split('\n').map(l => l.replace(/\s+/g, '').toUpperCase());
     
-    // Line 3 Score: mostly letters & chevrons. Address lines can also be mostly
-    // letters, so chevrons and non-address labels are important tie-breakers.
-    let s3 = 0;
-    if (numDigits < 5) s3 += 15;
-    else if (numDigits >= 8) s3 -= 15;
-    const chevrons = (l.match(/</g) || []).length;
-    if (chevrons >= 2) s3 += 25;
-    if (/^(VILLAGE|PARISH|COUNTY|DISTRICT|ADDRESS|MRZ)/.test(l)) s3 -= 20;
-
-    // Line 1 Score: starts with ID/1D/TST or contains NIN prefix
-    let s1 = 0;
-    const hasNinPrefix = /[CA1G0OI4][MFN13PR0-9]\d/.test(l);
-    const startsWithId = /^(ID|1D|I0|TST)/i.test(l);
-    if (startsWithId) s1 += 12;
-    if (hasNinPrefix) s1 += 10;
-    if (l.includes('TST')) s1 += 5;
-    if (/^\d{6}/.test(l)) s1 -= 5;
-
-    // Line 2 Score: starts with DOB date pattern, contains Sex, contains UGA
-    let s2 = 0;
-    const hasSexChar = /[0-9][MF<][0-9]/.test(l);
-    if (hasSexChar) s2 += 12;
-    if (/^[A-Z0-9]?\d{5}/.test(l)) s2 += 10;
-    if (l.includes('UGA') && !startsWithId) s2 += 6;
-    if (numDigits < 5) s2 -= 15;
-
-    return { line: l, s1, s2, s3 };
-  });
-
-  // Assign Line 3: highest Line 3 score
-  const candidates3 = [...scoredLines].sort((a, b) => b.s3 - a.s3);
-  if (candidates3[0] && candidates3[0].s3 > 0) {
-    line3 = candidates3[0].line;
-  }
-
-  // Assign Line 1 and 2 from remaining
-  const remaining = scoredLines.filter(c => c.line !== line3);
-  if (remaining.length >= 2) {
-    const cand1 = [...remaining].sort((a, b) => b.s1 - a.s1);
-    line1 = cand1[0].line;
-    line2 = cand1.find(c => c.line !== line1)?.line || '';
-  } else if (remaining.length === 1) {
-    if (remaining[0].s1 >= remaining[0].s2) {
-      line1 = remaining[0].line;
-    } else {
-      line2 = remaining[0].line;
-    }
-  }
-
-  if (!line1 && !line2 && !line3 && lines.length >= 3) {
-    line1 = lines[0];
-    line2 = lines[1];
-    line3 = lines[2];
-  }
-
-  // Parse Line 2: dob, sex, expiry (parsed first so DOB is available for Line 1 NIN year alignment)
-  let mrzDob = '';
-  if (line2) {
-    // Search after correcting OCR letter/digit confusion. A leading DOB zero
-    // is commonly read as O; searching the raw line would skip it and shift
-    // every fixed-width MRZ field that follows.
-    const fixedLine2ForStart = fixN(line2);
-    const r2start = fixedLine2ForStart.search(/[0-9]/);
-    let raw2trim = r2start >= 0 ? fixedLine2ForStart.slice(r2start) : line2;
-    let dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
-    if (!dob && /^[1-9][0-9]{5}[0-9MF]/.test(raw2trim)) {
-      const repaired = '0' + raw2trim;
-      const repairedDob = mrzYYMMDDToDisplay(fixN(repaired.slice(0, 6)), false);
-      if (repairedDob) {
-        raw2trim = repaired;
-        dob = repairedDob;
-      }
-    }
-    
-    if (dob) {
-      data.dob = dob;
-      mrzDob = dob;
-    }
-
-    const ugaIdx = raw2trim.search(/[UT][GS][AT]/);
-    let isCompactFormat = true;
-    if (ugaIdx >= 15) {
-      isCompactFormat = false;
-    } else if (ugaIdx < 0) {
-      isCompactFormat = !/[0-9]/.test(raw2trim[6] || '');
-    }
-    
-    const sexPos     = isCompactFormat ? 6 : 7;
-    const expiryStart = isCompactFormat ? 7 : 8;
-
-    const sex = validateSexOrBlank(raw2trim[sexPos]);
-    if (sex) data.sex = sex;
-    
-    const expiry = mrzYYMMDDToDisplay(fixN(raw2trim.slice(expiryStart, expiryStart + 6)), true);
-    if (expiry) data.expiry = expiry;
-  }
-
-  const joinedMrz = lines.join('');
-  const globalNinMatch = joinedMrz.match(/[CAP][MF][A-Z0-9]{12}/i);
-  if (globalNinMatch) {
-    const candidateNin = normalizeNinCandidate(globalNinMatch[0], mrzDob);
-    if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
-    const beforeNin = joinedMrz.slice(0, globalNinMatch.index || 0);
-    const cardDigits = fixDigitsOnly(beforeNin).replace(/[^0-9]/g, '');
-    if (!data.card_no && cardDigits.length >= 9) {
-      data.card_no = cardDigits.slice(-9);
-    }
-  }
-
-  // Parse Line 1: card_no & nin
-  if (line1) {
-    const fixedLine1 = fixN(line1).replace(/</g, '');
-    const ninStart = fixedLine1.search(/[CA1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
-    const cardZone = ninStart > 5 ? line1.slice(5, ninStart) : line1.slice(5, 17);
-    const cardNoRaw = fixDigitsOnly(cardZone).replace(/[^0-9]/g, '');
-    if (cardNoRaw.length >= 7) {
-      data.card_no = cardNoRaw.slice(0, 9);
-    }
-    
-    const remainingStr = fixedLine1;
-    const directNin = remainingStr.match(/[CAP][MF][A-Z0-9]{12}/i);
-    if (directNin) {
-      const candidateNin = normalizeNinCandidate(directNin[0], mrzDob);
-      if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
-    }
-
-    const ninMatch = !data.nin && remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
-    if (ninMatch) {
-      let p1 = ninMatch[1].toUpperCase();
-      const p2 = ninMatch[2];
-      const p3 = ninMatch[3].slice(0, 3);
-      
-      if (/[1G0OIL]/.test(p1[0])) p1 = 'C' + p1[1];
-      else if (p1[0] === '4') p1 = 'A' + p1[1];
-      
-      if (/[1NHK0OBH]/.test(p1[1])) p1 = p1[0] + 'M';
-      else if (/[PRE35]/.test(p1[1])) p1 = p1[0] + 'F';
-      
-      const candidateNin = normalizeNinCandidate(p1 + p2 + p3, mrzDob);
-      if (validateNin(candidateNin, mrzDob)) {
-        data.nin = candidateNin;
-      }
-    }
-
-    if (data.nin && NEW_NIN_REGEX.test(data.nin) && cardNoRaw.length >= 9) {
-      data.card_no = 'CA' + cardNoRaw.slice(0, 9);
-    }
-  }
-
-  // Parse Line 3: Names
-  if (line3) {
-    // Tesseract commonly reads the MRZ chevrons between names as alternating
-    // K/S/L/X characters. Restore that separator when a filler run occurs
-    // between two plausible name tokens (for example MUYUNGASKSKTIMOTHY).
-    line3 = line3.replace(/([AEIOU])([KSLX]{2,})(?=[A-Z]{3,})/g, '$1<<');
-    const firstChevronIdx = line3.search(/<+/);
-    let sRaw = '', gRaw = '';
-    if (firstChevronIdx >= 0) {
-      sRaw = line3.slice(0, firstChevronIdx);
-      gRaw = line3.slice(firstChevronIdx).replace(/^<+/, '');
-    } else {
-      sRaw = line3;
-    }
-    
-    if (firstChevronIdx >= 0 && gRaw.replace(/[^A-Z]/g, '').length > 0) {
-      let sur = normalizeNameStrict(cleanMrzNameToken(sRaw));
-      let giv = normalizeNameStrict(gRaw);
-      
-      const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER','SUENAML','SURNAME','NATIONALITY','SEX','BIRTH','EXPIRY','HOLDER','SIGNATURE','DATE','OF','LS','LA','AS','IS','TO','BATH','MAME','BATE','ATIONALITY','OER','WONA','TEE','LAMERY']);
-      if (giv) {
-        const toks = giv.split(/\s+/).filter(Boolean).map(cleanMrzNameToken);
-        let cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
-        cleanToks = cleanToks.filter(t => t.length > 2 || (t.length === 2 && /[AEIOU]/.test(t)));
-        cleanToks = cleanToks.filter(t => !/^C[MF][A-Z0-9]{1,8}$/.test(t));
-        cleanToks = cleanToks.filter(t => /[AEIOU]/.test(t) || t.length <= 2);
-        giv = cleanToks.join(' ');
-      }
-      if (sur) {
-        const toks = sur.split(/\s+/).filter(Boolean).map(cleanMrzNameToken);
-        let cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
-        cleanToks = cleanToks.filter(t => t.length > 2 || (t.length === 2 && /[AEIOU]/.test(t)));
-        cleanToks = cleanToks.filter(t => !/^C[MF][A-Z0-9]{1,8}$/.test(t));
-        cleanToks = cleanToks.filter(t => /[AEIOU]/.test(t) || t.length <= 2);
-        sur = cleanToks.join(' ');
-      }
-
-      if (isPersonNameStrict(sur)) data.surname = sur;
-      if (giv) data.given_names = giv;
-      data.nationality = 'UGA';
-    }
-  }
-
-  return data;
-}
-
-const ROI = {
-  FRONT: {
-    SURNAME:     { x: 260, y: 158, w: 165, h: 34  },
-    GIVEN_NAMES: { x: 260, y: 218, w: 305, h: 40  },
-    NATIONALITY: { x: 255, y: 285, w: 120, h: 55  },
-    SEX:         { x: 418, y: 285, w: 65,  h: 55  },
-    DOB:         { x: 535, y: 312, w: 195, h: 38  },
-    NIN:         { x: 245, y: 350, w: 300, h: 55  },
-    CARD_NO:     { x: 535, y: 372, w: 205, h: 42  },
-    EXPIRY:      { x: 245, y: 418, w: 215, h: 55  },
-  },
-  BACK: {
-    ADDRESS_BLOCK: { x: 70,  y: 160, w: 330, h: 145 },
-    MRZ_LINE_1:    { x: 8,   y: 318, w: 830, h: 58  },
-    MRZ_LINE_2:    { x: 8,   y: 370, w: 830, h: 58  },
-    MRZ_LINE_3:    { x: 8,   y: 423, w: 830, h: 58  },
-  }
-};
-
-const FRONT_ROIS = {
-  surname:       ROI.FRONT.SURNAME,
-  given_names:   ROI.FRONT.GIVEN_NAMES,
-  nationality:   ROI.FRONT.NATIONALITY,
-  sex:           ROI.FRONT.SEX,
-  dob:           ROI.FRONT.DOB,
-  nin:           ROI.FRONT.NIN,
-  card_no:       ROI.FRONT.CARD_NO,
-  expiry:        ROI.FRONT.EXPIRY
-};
-
-const BACK_ROIS = {
-  address_block: ROI.BACK.ADDRESS_BLOCK,
-  mrz_line1:     ROI.BACK.MRZ_LINE_1,
-  mrz_line2:     ROI.BACK.MRZ_LINE_2,
-  mrz_line3:     ROI.BACK.MRZ_LINE_3
-};
-
-const NEW_FRONT_ROIS = {
-  surname:       { x: 235, y: 118, w: 180, h: 44 },
-  given_names:   { x: 235, y: 176, w: 180, h: 44 },
-  nationality:   { x: 235, y: 292, w: 120, h: 48 },
-  sex:           { x: 435, y: 276, w: 75,  h: 48 },
-  dob:           { x: 520, y: 276, w: 190, h: 48 },
-  nin:           { x: 235, y: 350, w: 285, h: 48 },
-  issue_date:    { x: 235, y: 405, w: 190, h: 48 },
-  expiry:        { x: 520, y: 405, w: 190, h: 48 },
-  card_no:       { x: 650, y: 462, w: 200, h: 55 }
-};
-
-const NEW_BACK_ROIS = {
-  address_block: { x: 0,   y: 8,   w: 835, h: 100 },
-  district:      { x: 108, y: 12,  w: 180, h: 30  },
-  county:        { x: 108, y: 47,  w: 250, h: 30  },
-  sub_county:    { x: 123, y: 81,  w: 180, h: 30  },
-  parish:        { x: 445, y: 12,  w: 210, h: 30  },
-  village:       { x: 470, y: 52,  w: 170, h: 24  },
-  mrz_line1:     { x: 8,   y: 352, w: 840, h: 58  },
-  mrz_line2:     { x: 8,   y: 410, w: 840, h: 58  },
-  mrz_line3:     { x: 8,   y: 468, w: 840, h: 58  }
-};
-
-const SYNTHETIC_FRONT_ROIS = {
-  surname:      { x: 0.4150, y: 0.1250, w: 0.3950, h: 0.0700 },
-  given_names:  { x: 0.4150, y: 0.2070, w: 0.3950, h: 0.0700 },
-  nationality:  { x: 0.2270, y: 0.3210, w: 0.0990, h: 0.0700 },
-  sex:          { x: 0.3850, y: 0.3210, w: 0.0490, h: 0.0700 },
-  dob:          { x: 0.4840, y: 0.3210, w: 0.1980, h: 0.0700 },
-  nin:          { x: 0.2270, y: 0.4000, w: 0.4450, h: 0.0700 },
-  card_no:      { x: 0.2270, y: 0.4830, w: 0.2170, h: 0.0700 },
-  expiry:       { x: 0.4840, y: 0.4830, w: 0.1980, h: 0.0700 }
-};
-
-const SYNTHETIC_BACK_ROIS = {
-  address_block: { x: 0.0158, y: 0.3072, w: 0.4051, h: 0.2978 },
-  mrz_line1:     { x: 0.005, y: 0.72, w: 0.99, h: 0.09 },
-  mrz_line2:     { x: 0.005, y: 0.81, w: 0.99, h: 0.09 },
-  mrz_line3:     { x: 0.005, y: 0.90, w: 0.99, h: 0.095 }
-};
-
-const FIELD_OCR_SETTINGS = {
-  surname:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
-  given_names:   { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
-  nationality:   { psm: '6', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' },
-  sex:           { psm: '6', whitelist: 'MF' },
-  dob:           { psm: '6', whitelist: '0123456789.' },
-  nin:           { psm: '6', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
-  issue_date:    { psm: '6', whitelist: '0123456789.' },
-  expiry:        { psm: '6', whitelist: '0123456789.' },
-  card_no:       { psm: '8', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
-  mrz_line1:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
-  mrz_line2:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
-  mrz_line3:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
-  address_block: { psm: '6', whitelist: '' },
-  district:      { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
-  county:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
-  sub_county:    { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
-  parish:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
-  village:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' }
-};
-
-function levenshtein(a, b) {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-  return dp[m][n];
-}
-
-// ─── Merge + MRZ backfill ────────────────────────────────────────────────
-function reconcileName(frontName, mrzName) {
-  if (!frontName) return mrzName || '';
-  if (!mrzName) return frontName || '';
-
-  const frontLooksNoisy = isLikelyNameNoise(frontName);
-  const mrzLooksValid = isPersonNameStrict(normalizeNameStrict(mrzName));
-  if (frontLooksNoisy && mrzLooksValid) return mrzName;
-  if (mrzLooksValid && isWeakName(frontName)) return mrzName;
-
-  const fClean = frontName.toUpperCase().replace(/[^A-Z]/g, '');
-  const mClean = mrzName.toUpperCase().replace(/[^A-Z]/g, '');
-
-  if (fClean === mClean) return frontName;
-
-  // 1. If one name contains the other as a substring (spaces removed), return the longer one
-  if (mClean.includes(fClean)) return mrzName;
-  if (fClean.includes(mClean)) return frontName;
-
-  const fToks = frontName.toUpperCase().split(/\s+/).filter(Boolean);
-  const mToks = mrzName.toUpperCase().split(/\s+/).filter(Boolean);
-
-  // 2. If same number of tokens, reconcile token-by-token (handles prefix/suffix cut-offs in individual words)
-  if (fToks.length === mToks.length) {
-    const reconciled = [];
-    for (let i = 0; i < fToks.length; i++) {
-      const ft = fToks[i];
-      const mt = mToks[i];
-      
-      if (ft === mt) {
-        reconciled.push(ft);
-      } else if (mt.startsWith(ft) || mt.endsWith(ft)) {
-        reconciled.push(mt);
-      } else if (ft.startsWith(mt) || ft.endsWith(mt)) {
-        reconciled.push(ft);
-      } else if (mrzLooksValid) {
-        const dist = levenshtein(ft, mt);
-        const maxLen = Math.max(ft.length, mt.length);
-        if (maxLen > 0 && dist <= 2 && dist / maxLen <= 0.34) {
-          reconciled.push(mt);
-        } else {
-          reconciled.push(ft);
+    for (let i = 0; i < lines.length - 2; i++) {
+        const l1 = lines[i];
+        const l2 = lines[i+1];
+        const l3 = lines[i+2];
+        if (l1.startsWith('IDUGA') && l1.length >= 28 && l2.length >= 28 && l3.length >= 28) {
+            return [l1, l2, l3];
         }
-      } else {
-        reconciled.push(ft); // default fallback
-      }
     }
-    return reconciled.join(' ');
-  }
-
-  // 3. Fallback suffix/prefix check
-  if (mClean.startsWith(fClean) || mClean.endsWith(fClean)) return mrzName;
-  if (fClean.startsWith(mClean) || fClean.endsWith(mClean)) return frontName;
-
-  return frontName;
+    return null; 
 }
 
-function isLikelyNameNoise(name) {
-  const raw = String(name || '').toUpperCase();
-  const compact = raw.replace(/[^A-Z]/g, '');
-  if (!compact || compact.length < 3) return true;
-  if (/\b(SURNAME|GIVEN|NAMES?|NATIONALITY|UGA|SEX|DOB|DATE|EXPIRY|CARD|NIN|HOLDER|SIGNATURE)\b/.test(raw)) {
-    return true;
-  }
-  if (/(DATE|EXP|HOLDER|NATIONALITY|GIVEN|NAMES|CARD|UGA|SEX|NIN)/.test(compact)) {
-    return true;
-  }
-  return false;
-}
+/**
+ * Parses the extracted TD1 MRZ lines into clean, standardized fields.
+ */
+function parseMRZ(mrzLines) {
+    let [line1, line2, line3] = mrzLines;
+    
+    let line1Clean = line1.replace(/\s+/g, '');
+    let nin = line1Clean.substring(15, 29).replace(/</g, '');
+    nin = nin.replace(/O/g, '0');
+    
+    let line2Clean = line2.replace(/\s+/g, '');
+    let dobRaw = line2Clean.substring(0, 6)
+        .replace(/D/g, '0')
+        .replace(/O/g, '0')
+        .replace(/I/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2');
+        
+    let sexRaw = line2Clean.substring(7, 8);
+    let nationality = line2Clean.substring(15, 18).replace(/</g, '');
 
-function isWeakName(name) {
-  const normalized = normalizeNameStrict(name);
-  const compact = normalized.replace(/[^A-Z]/g, '');
-  const tokens = normalized.split(/\s+/).filter(Boolean);
-  if (compact.length < 4) return true;
-  if (tokens.length === 1 && compact.length < 5) return true;
-  if (!/[AEIOU]/.test(compact)) return true;
-  return false;
-}
+    let line3Clean = line3.replace(/\s+/g, '<');
+    line3Clean = line3Clean.replace(/[KLY]{4,}/g, (m) => '<'.repeat(m.length));
+    line3Clean = line3Clean.replace(/<K<K/g, '<<').replace(/<K</g, '<<'); 
+    let match = line3Clean.match(/^(.*?)(?:<{3,}|$)/);
+    let namePart = match ? match[1] : line3Clean;
+    let surname = '';
+    let givenName = '';
 
-function normalizeNationality(raw) {
-  const v = String(raw || '').toUpperCase().replace(/[^A-Z]/g, '');
-  if (!v) return '';
-  if (v.includes('UGA') || v.includes('UGANDA')) return 'UGA';
-  return '';
-}
-
-function repairUgandaSurname(raw) {
-  const name = normalizeNameStrict(raw);
-  const compact = name.replace(/[^A-Z]/g, '');
-  if (compact === 'ATO' || compact === 'ATOS' || compact.startsWith('ATOS')) return 'KATO';
-  if (compact === 'RUNGI') return 'BIRUNGI';
-  return name;
-}
-
-function looksLikeMrzLine(line) {
-  const l = (line || '').toString().toUpperCase().replace(/\s+/g, '');
-  if (l.length < 18) return false;
-  const alnumChevron = (l.match(/[A-Z0-9<]/g) || []).length;
-  if (alnumChevron / l.length < 0.85) return false;
-  const digits = (l.match(/[0-9]/g) || []).length;
-  const chevrons = (l.match(/</g) || []).length;
-  return digits >= 3 || chevrons >= 1;
-}
-
-function looksLikeMrzBlock(lines) {
-  const arr = (lines || []).filter(Boolean);
-  const validCount = arr.filter(looksLikeMrzLine).length;
-  const hasIdMarker = arr.some(l => /ID[A-Z]{3}/i.test(l));
-  const hasNinPattern = arr.some(l => /[CAP][MF][A-Z0-9]{9,12}/i.test(l));
-  return validCount >= 2 && (hasIdMarker || hasNinPattern);
-}
-
-function scoreBackExtraction(backData, mrzLines) {
-  const d = backData || {};
-  let score = 0;
-  if (validateNin(d.nin, d.dob)) score += 2;
-  if (validateDob(d.dob)) score += 2;
-  if (validateSexOrBlank(d.sex)) score += 1;
-  if (validateExpiry(d.expiry)) score += 1;
-  if (isPersonNameStrict(normalizeNameStrict(d.surname))) score += 2;
-  if (d.given_names && normalizeNameStrict(d.given_names)) score += 1;
-  ['village', 'parish', 'sub_county', 'county', 'district'].forEach(k => {
-    if (cleanLocationNameStrict(d[k])) score += 1;
-  });
-  if (looksLikeMrzBlock(mrzLines)) score += 2;
-  return score;
-}
-
-// Accepts { front: {}, back: {} } and returns a merged flat result object.
-function mergeAndApplyMrzBackfill(merged) {
-  const front = merged.front || {};
-  const back  = merged.back  || {};
-
-  const mrz = {
-    nin:         back.nin         || '',
-    dob:         back.dob         || '',
-    sex:         back.sex         || '',
-    expiry:      back.expiry      || '',
-    surname:     back.surname     || '',
-    given_names: back.given_names || '',
-    card_no:     back.card_no     || '',
-  };
-
-  let dataQualityFlag = '';
-  let barcodeOcrMismatches = [];
-
-  if (back.source === 'barcode') {
-    // Check Surname mismatch
-    if (front.surname && back.surname && front.surname.toUpperCase().trim() !== back.surname.toUpperCase().trim()) {
-      barcodeOcrMismatches.push(`Surname mismatch (Front OCR: "${front.surname}", Barcode: "${back.surname}")`);
-    }
-    // Check Given Names mismatch
-    if (front.given_names && back.given_names && front.given_names.toUpperCase().trim() !== back.given_names.toUpperCase().trim()) {
-      barcodeOcrMismatches.push(`Given Names mismatch (Front OCR: "${front.given_names}", Barcode: "${back.given_names}")`);
-    }
-    // Check DOB mismatch
-    if (front.dob && back.dob && front.dob !== back.dob) {
-      barcodeOcrMismatches.push(`DOB mismatch (Front OCR: "${front.dob}", Barcode: "${back.dob}")`);
-    }
-    // Check NIN mismatch
-    if (front.nin && back.nin && front.nin.toUpperCase().trim() !== back.nin.toUpperCase().trim()) {
-      barcodeOcrMismatches.push(`NIN mismatch (Front OCR: "${front.nin}", Barcode: "${back.nin}")`);
-    }
-    // Check Sex mismatch
-    if (front.sex && back.sex && front.sex.toUpperCase().trim() !== back.sex.toUpperCase().trim()) {
-      barcodeOcrMismatches.push(`Sex mismatch (Front OCR: "${front.sex}", Barcode: "${back.sex}")`);
+    if (namePart.includes('<<')) {
+        let parts = namePart.split('<<');
+        surname = parts[0];
+        givenName = parts.slice(1).join('<');
+    } else {
+        let firstIndex = namePart.indexOf('<');
+        if (firstIndex !== -1) {
+            surname = namePart.substring(0, firstIndex);
+            givenName = namePart.substring(firstIndex + 1);
+        } else {
+            surname = namePart;
+            givenName = '';
+        }
     }
 
-    if (barcodeOcrMismatches.length > 0) {
-      dataQualityFlag = 'Mismatches: ' + barcodeOcrMismatches.join('; ');
-    }
-  }
+    surname = surname.replace(/</g, ' ').trim();
+    givenName = givenName.replace(/</g, ' ').trim();
 
-  // ── front-vs-MRZ-OCR mismatch detection (back.source === 'ocr') ──────────
-  // Override behaviour is unchanged — MRZ still wins via reconcile*.
-  // This block only makes the disagreement visible in dataQualityFlag so
-  // that a silent corruption (e.g. garbled OCR overwriting a correct front
-  // value) surfaces to field staff rather than being silently swallowed.
-  //
-  // Comparison is gated on both values passing format validation: if only
-  // one side is valid, reconcile* would already have chosen the valid one
-  // without a real mismatch, so there is nothing meaningful to flag.
-  if (back.source === 'ocr') {
-    const mrzOcrMismatches = [];
-
-    const vFrontDob = validateDob(front.dob);
-    const vMrzDob   = validateDob(mrz.dob);
-    if (vFrontDob && vMrzDob && vFrontDob !== vMrzDob) {
-      mrzOcrMismatches.push(
-        `DOB mismatch: front=${vFrontDob} vs back-MRZ=${vMrzDob} \u2014 MRZ value used, please verify against physical card`
-      );
+    if (givenName.startsWith('SK ') || givenName.startsWith('SK')) {
+        let possibleClean = givenName.substring(2).trim();
+        if (possibleClean.length > 2) {
+            givenName = possibleClean;
+        }
     }
 
-    const vFrontNin = validateNin(front.nin);
-    const vMrzNin   = validateNin(mrz.nin);
-    if (vFrontNin && vMrzNin && vFrontNin !== vMrzNin) {
-      mrzOcrMismatches.push(
-        `NIN mismatch: front=${vFrontNin} vs back-MRZ=${vMrzNin} \u2014 MRZ value used, please verify against physical card`
-      );
+    let dob = '';
+    if (dobRaw && dobRaw.length === 6 && !isNaN(parseInt(dobRaw))) {
+        let year = parseInt(dobRaw.substring(0, 2), 10);
+        let month = dobRaw.substring(2, 4);
+        let day = dobRaw.substring(4, 6);
+        
+        let currentYear2Digit = new Date().getFullYear() % 100;
+        let fullYear = (year > currentYear2Digit) ? (1900 + year) : (2000 + year);
+        dob = fullYear + '-' + month + '-' + day;
     }
 
-    if (mrzOcrMismatches.length > 0) {
-      dataQualityFlag = 'MRZ-OCR override: ' + mrzOcrMismatches.join('; ');
-    }
-  }
-
-  let out = {
-    surname:     '',
-    given_names: '',
-    sex:         '',
-    dob:         '',
-    nin:         '',
-    expiry:      '',
-    card_no:     '',
-    nationality: '',
-    village:     back.village     || '',
-    parish:      back.parish      || '',
-    sub_county:  back.sub_county  || '',
-    county:      back.county      || '',
-    district:    back.district    || '',
-  };
-
-  if (back.source === 'barcode') {
-    out.dob         = back.dob || front.dob || '';
-    out.expiry      = back.expiry || front.expiry || '';
-    out.nin         = back.nin || front.nin || '';
-    out.sex         = back.sex || front.sex || '';
-    out.surname     = back.surname || front.surname || '';
-    out.given_names = back.given_names || front.given_names || '';
-    out.card_no     = back.card_no || front.card_no || '';
-    out.nationality = back.nationality || front.nationality || 'UGA';
-  } else {
-    // Reconcile dates, sex, and NINs using prioritized accuracy rules
-    out.dob         = reconcileDob(front.dob, mrz.dob);
-    out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
-    out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
-    out.sex         = reconcileSex(front.sex, mrz.sex);
-
-    // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
-    if (!out.sex && out.nin && out.nin.length >= 2) {
-      const derivedSex = out.nin[1].toUpperCase();
-      if (derivedSex === 'M' || derivedSex === 'F') {
-        out.sex = derivedSex;
-      }
-    }
-
-    out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
-    out.given_names = reconcileName(front.given_names, mrz.given_names);
-    out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
-    out.nationality = normalizeNationality(back.nationality) ||
-                      normalizeNationality(front.nationality) ||
-                      ((out.nin || out.dob || out.surname) ? 'UGA' : '');
-  }
-
-  // Apply validations and corrections
-  out.nin         = validateNin(out.nin);
-  out.dob         = validateDob(out.dob);
-  out.sex         = validateSexOrBlank(out.sex);
-  out.expiry      = validateExpiry(out.expiry);
-  out.card_no     = normalizeCardNumber(out.card_no);
-
-  // Confidence scores
-  const confidence = {};
-  const fields = [
-    { key: 'nin',         get: () => out.nin,         valid: v => !!validateNin(v),                                   mrz: mrz.nin         },
-    { key: 'dob',         get: () => out.dob,         valid: v => !!validateDob(v),                                   mrz: mrz.dob         },
-    { key: 'sex',         get: () => out.sex,         valid: v => !!validateSexOrBlank(v),                            mrz: mrz.sex         },
-    { key: 'surname',     get: () => out.surname,     valid: v => isPersonNameStrict(normalizeNameStrict(v)),          mrz: mrz.surname     },
-    { key: 'given_names', get: () => out.given_names, valid: v => isPersonNameStrict(normalizeNameStrict(v)),          mrz: mrz.given_names }
-  ];
-
-  for (const f of fields) {
-    const val     = f.get();
-    const mrzVal  = f.mrz;
-    const passes  = f.valid(val);
-    const matchesMrz = passes && mrzVal &&
-      String(val).toUpperCase().trim() === String(mrzVal).toUpperCase().trim();
-
-    let level = 'low';
-    if (passes && matchesMrz)  level = 'high';
-    else if (passes)           level = 'medium';
-    confidence[f.key] = level;
-  }
-
-  out.confidence = confidence;
-  out.dataQualityFlag = dataQualityFlag;
-  out.barcodeWarnings = back.barcodeWarnings || [];
-  return out;
-}
-
-function reconcileDob(frontDob, mrzDob) {
-  const vFront = validateDob(frontDob);
-  const vMrz   = validateDob(mrzDob);
-  if (vFront && vMrz && vFront !== vMrz) return vMrz;
-  return vFront || vMrz || frontDob || mrzDob || '';
-}
-
-function reconcileExpiry(frontExpiry, mrzExpiry) {
-  const vFront = validateExpiry(frontExpiry);
-  const vMrz   = validateExpiry(mrzExpiry);
-  if (vFront && vMrz && vFront !== vMrz) return vMrz;
-  return vFront || vMrz || frontExpiry || mrzExpiry || '';
-}
-
-function reconcileSex(frontSex, mrzSex) {
-  const vFront = validateSexOrBlank(frontSex);
-  const vMrz   = validateSexOrBlank(mrzSex);
-  if (vFront && vMrz && vFront !== vMrz) return vMrz;
-  return vFront || vMrz || frontSex || mrzSex || '';
-}
-
-function reconcileNins(frontNin, mrzNin, dob) {
-  const vFront = validateNin(frontNin, dob);
-  const vMrz   = validateNin(mrzNin, dob);
-  if (vFront && vMrz) {
-    if (vFront === vMrz) return vFront;
-    return vMrz;
-  }
-  
-  const cleanFront = validateNin(frontNin, dob);
-  const cleanMrz   = validateNin(mrzNin, dob);
-  if (cleanFront) return cleanFront;
-  if (cleanMrz) return cleanMrz;
-  
-  if (frontNin) {
-    const cand = normalizeNinCandidate(frontNin, dob);
-    if (validateNin(cand, dob)) return cand;
-  }
-  if (mrzNin) {
-    const cand = normalizeNinCandidate(mrzNin, dob);
-    if (validateNin(cand, dob)) return cand;
-  }
-
-  return '';
+    return {
+        surname: surname,
+        givenName: givenName,
+        sex: sexRaw === 'M' ? 'Male' : (sexRaw === 'F' ? 'Female' : sexRaw),
+        dateOfBirth: dob,
+        nationality: nationality,
+        nin: nin
+    };
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────
