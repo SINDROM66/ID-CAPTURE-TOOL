@@ -933,41 +933,10 @@ function cropROI(canvas, roi, fieldName) {
   return out;
 }
 
-function preprocessROI(croppedCanvas, scaleFactor = 2.5) {
-  const srcW = croppedCanvas.width;
-  const srcH = croppedCanvas.height;
-  const dstW = Math.round(srcW * scaleFactor);
-  const dstH = Math.round(srcH * scaleFactor);
 
-  const canvas = document.createElement('canvas');
-  canvas.width = dstW;
-  canvas.height = dstH;
-  const ctx = canvas.getContext('2d');
-
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(croppedCanvas, 0, 0, srcW, srcH, 0, 0, dstW, dstH);
-
-  const imgData = ctx.getImageData(0, 0, dstW, dstH);
-  const px = imgData.data;
-  for (let i = 0; i < px.length; i += 4) {
-    const r = px[i];
-    const g = px[i + 1];
-    const b = px[i + 2];
-    let v = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (v < 130) {
-      v = Math.max(0, v - (130 - v) * 0.5);
-    } else {
-      v = Math.min(255, v + (v - 130) * 0.5);
-    }
-    px[i] = px[i + 1] = px[i + 2] = v;
-  }
-  ctx.putImageData(imgData, 0, 0);
-  return canvas;
-}
 
 // ─── Tab switching ────────────────────────────
-function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '') {
+function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '', layout = 'old') {
   const srcW = croppedCanvas.width;
   const srcH = croppedCanvas.height;
   const dstW = Math.max(1, Math.round(srcW * scaleFactor));
@@ -983,6 +952,20 @@ function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '') {
 
   const imgData = ctx.getImageData(0, 0, dstW, dstH);
   const px = imgData.data;
+  const isNewID = layout === 'new';
+  if (isNewID && fieldName === 'full_front') {
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] < 90 && px[i + 1] < 90 && px[i + 2] < 90) {
+        px[i] = px[i + 1] = px[i + 2] = 0;
+      } else {
+        px[i] = px[i + 1] = px[i + 2] = 255;
+      }
+      px[i + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return canvas;
+  }
+
   const lum = new Float32Array(dstW * dstH);
   let sum = 0;
 
@@ -1392,7 +1375,7 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
       tessedit_pageseg_mode: '6'
     });
 
-    const preprocessed = preprocessROI(frontCanvas, 1.6, 'full_front');
+    const preprocessed = preprocessROI(frontCanvas, 1.6, 'full_front', frontLayout);
     const result = await worker.recognize(preprocessed.toDataURL('image/png'));
     await worker.terminate();
 

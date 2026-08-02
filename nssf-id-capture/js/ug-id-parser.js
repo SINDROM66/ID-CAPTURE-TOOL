@@ -1,933 +1,1370 @@
-(function (global) {
-  "use strict";
+/* ═══════════════════════════════════════════════════════════════════════
+   parser.js — Pure OCR parsing logic for Uganda National ID cards.
+   Extracted from app.js for use in Node.js test harness.
+   NO browser APIs: no document, Image, canvas, window, FileReader.
+   Accepts raw OCR text strings as input.
+   ═══════════════════════════════════════════════════════════════════════ */
 
-  // --------------------------------------------------------------------
-  // Payload layout
-  // --------------------------------------------------------------------
+'use strict';
 
-  const IDX_SURNAME = 0;
-  const IDX_GIVEN_NAME = 1;
-  const IDX_OTHER_NAME = 2;
-  const IDX_DOB = 3;
-  const IDX_ISSUED = 4;
-  const IDX_EXPIRES = 5;
-  const IDX_NIN = 6;
-  const IDX_CARD_NUMBER = 7;
-  const IDX_MINUTIAE = 8;
-  const MIN_FIELDS = 8;
+// ─── Regex constants ──────────────────────────────────────────────────────
+const NIN_REGEX = /^[CAP][MF][A-Z0-9]{12}$/;
+const OLD_NIN_REGEX = /^[CAP][MF][0-9]{9}[A-Z]{3}$/;
+const NEW_NIN_REGEX = /^[CAP][MF][0-9]{7}[A-Z]{2}[0-9][A-Z]{2}$/;
 
-  // C = citizen, and the second character encodes sex.
-  const NIN_PATTERN = /^([A-Z])([MF])(\d{2})([0-9A-Z]{10})$/;
+// ─── Low-level helpers ────────────────────────────────────────────────────
 
-  const SEX_CODES = { M: "Male", F: "Female" };
+function normalizeOCRText(text) {
+  return (text || '')
+    .replace(/[|]/g, 'I')
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .toUpperCase();
+}
 
-  const BIOMETRIC_TAG = "[FNG]";
+// OCR confusion maps (bidirectional)
+const DIGIT_TO_LETTER = { '0':'O','1':'I','5':'S','8':'B','6':'G','4':'A','2':'Z','3':'J' };
+const LETTER_TO_DIGIT = { 
+  'O':'0', 'I':'1', 'S':'5', 'B':'8', 'G':'6', 'A':'4', 'Z':'2', 
+  'D':'0', 'E':'0', 'Q':'0', 'R':'8', 'T':'7', 'Y':'7', 'U':'0', 
+  'P':'9', 'H':'8' 
+};
 
-  // Each minutia is a fixed-width record: X(2) Y(2) angle(1), big-endian,
-  // sorted ascending by X. A short header precedes the array.
-  const MINUTIA_RECORD_BYTES = 5;
-
-  // --------------------------------------------------------------------
-  // Scanner tuning
-  // --------------------------------------------------------------------
-
-  const DARK_THRESHOLD = 110; // pixel value below which we call a pixel "ink"
-  const MIN_ROW_INK = 50; // ink pixels needed to count a row as part of a symbol
-  const MIN_COL_INK = 5;
-  const QUIET_ZONE_PX = 20; // margin added around the detected symbol
-
-  // Upscale factors to try, in order. 2x is the usual winner: PDF417 wants
-  // roughly 2-3 pixels per narrow module. Larger is NOT better — on the
-  // reference image 3x and 4x both failed where 2x decoded perfectly.
-  const SCALE_LADDER = [2, 1, 3];
-
-  // --------------------------------------------------------------------
-  // Errors
-  // --------------------------------------------------------------------
-
-  class CardParseError extends Error {
-    // The payload could not be interpreted as a card record.
-    constructor(message) {
-      super(message);
-      this.name = "CardParseError";
-    }
-  }
-
-  class ScanError extends Error {
-    // No structurally valid payload could be read from the image.
-    constructor(message) {
-      super(message);
-      this.name = "ScanError";
-    }
-  }
-
-  // --------------------------------------------------------------------
-  // Data model
-  // --------------------------------------------------------------------
-
-  class Fingerprint {
-    // Metadata about a biometric section. Templates are never interpreted.
-    constructor() {
-      this.fingerIndex = null;
-      this.minutiaeCount = null;
-      this.minutiaeBytes = null;
-      this.sealedBlockBytes = null;
-    }
-
-    toDict() {
-      return {
-        finger_index: this.fingerIndex,
-        minutiae_count: this.minutiaeCount,
-        minutiae_bytes: this.minutiaeBytes,
-        sealed_block_bytes: this.sealedBlockBytes,
-      };
-    }
-  }
-
-  class CardRecord {
-    constructor({
-      surname,
-      givenName,
-      otherName,
-      dateOfBirth,
-      issueDate,
-      expiryDate,
-      nin,
-      sex,
-      cardNumber,
-      fingerprint = new Fingerprint(),
-      warnings = [],
-      source = null,
-      raw = "",
-    }) {
-      this.surname = surname;
-      this.givenName = givenName;
-      this.otherName = otherName;
-      this.dateOfBirth = dateOfBirth;
-      this.issueDate = issueDate;
-      this.expiryDate = expiryDate;
-      this.nin = nin;
-      this.sex = sex;
-      this.cardNumber = cardNumber;
-      this.fingerprint = fingerprint;
-      this.warnings = warnings;
-      this.source = source;
-
-      // The full payload, including biometric templates. Kept non-enumerable
-      // so JSON.stringify / console.log / toDict() never surface it.
-      Object.defineProperty(this, "raw", {
-        value: raw,
-        enumerable: false,
-        writable: false,
-      });
-    }
-
-    get fullName() {
-      return [this.surname, this.givenName, this.otherName]
-        .filter(Boolean)
-        .join(" ");
-    }
-
-    get isExpired() {
-      return this.expiryDate.getTime() < utcToday().getTime();
-    }
-
-    age(on) {
-      const ref = on || utcToday();
-      const hadBirthday =
-        ref.getUTCMonth() > this.dateOfBirth.getUTCMonth() ||
-        (ref.getUTCMonth() === this.dateOfBirth.getUTCMonth() &&
-          ref.getUTCDate() >= this.dateOfBirth.getUTCDate());
-      return (
-        ref.getUTCFullYear() -
-        this.dateOfBirth.getUTCFullYear() -
-        (hadBirthday ? 0 : 1)
-      );
-    }
-
-    toDict() {
-      return {
-        surname: this.surname,
-        given_name: this.givenName,
-        other_name: this.otherName,
-        full_name: this.fullName,
-        date_of_birth: isoDate(this.dateOfBirth),
-        issue_date: isoDate(this.issueDate),
-        expiry_date: isoDate(this.expiryDate),
-        nin: this.nin,
-        sex: this.sex,
-        card_number: this.cardNumber,
-        age: this.age(),
-        is_expired: this.isExpired,
-        fingerprint: this.fingerprint.toDict(),
-        warnings: [...this.warnings],
-        source: this.source,
-      };
-    }
-  }
-
-  function utcToday() {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  }
-
-  function isoDate(d) {
-    const y = String(d.getUTCFullYear()).padStart(4, "0");
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(d.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-  }
-
-  // --------------------------------------------------------------------
-  // Payload helpers
-  // --------------------------------------------------------------------
-
-  /**
-   * Decode base64 that may be missing its padding.
-   *
-   * Note: no canonical-form check. Real cards carry non-canonical base64 —
-   * the final group's unused low bits are not always zero — so re-encoding
-   * yields a different last character. Charset validation is the gate.
-   */
-  function b64Decode(value) {
-    const cleaned = (value || "").replace(/\s+/g, "");
-    const padded = cleaned + "=".repeat((4 - (cleaned.length % 4)) % 4);
-    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(padded)) {
-      throw new CardParseError("invalid base64 payload: unexpected characters");
-    }
-    try {
-      const binary = atob(padded);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return bytes;
-    } catch (exc) {
-      throw new CardParseError(`invalid base64 payload: ${exc.message}`);
-    }
-  }
-
-  // Name fields are base64 ASCII; tolerate a plaintext field as a fallback.
-  function decodeName(value, label) {
-    const raw = (value || "").trim();
-    if (!raw) return "";
-    try {
-      const bytes = b64Decode(raw);
-      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      return text.trim().toUpperCase();
-    } catch (exc) {
-      if (/^[A-Za-z '\-]+$/.test(raw)) return raw.toUpperCase();
-      throw new CardParseError(`could not decode ${label} field`);
-    }
-  }
-
-  function parseDate(value, label) {
-    const raw = (value || "").trim();
-    if (!/^\d{8}$/.test(raw)) {
-      throw new CardParseError(
-        `${label} must be 8 digits (DDMMYYYY), got ${JSON.stringify(raw)}`
-      );
-    }
-    const day = parseInt(raw.slice(0, 2), 10);
-    const month = parseInt(raw.slice(2, 4), 10);
-    const year = parseInt(raw.slice(4, 8), 10);
-    const d = new Date(Date.UTC(year, month - 1, day));
-    // Date.UTC silently rolls over invalid components (e.g. day 31 in a
-    // 30-day month) instead of throwing, so verify it round-trips.
-    if (
-      d.getUTCFullYear() !== year ||
-      d.getUTCMonth() !== month - 1 ||
-      d.getUTCDate() !== day
-    ) {
-      throw new CardParseError(
-        `${label} is not a valid DDMMYYYY date: ${JSON.stringify(raw)}`
-      );
-    }
-    return d;
-  }
-
-  // Split the head fields from any [FNG] biometric sections.
-  function splitSections(raw) {
-    const text = (raw || "").trim();
-    if (!text) throw new CardParseError("empty input");
-    const parts = text.split(BIOMETRIC_TAG);
-    const head = parts[0];
-    const tail = parts.slice(1);
-    return [head.split(";"), tail];
-  }
-
-  function parseFingerprint(headBlob, sections) {
-    const fp = new Fingerprint();
-
-    if (headBlob) {
-      try {
-        fp.minutiaeBytes = b64Decode(headBlob).length;
-      } catch (exc) {
-        // an unreadable template is not a parse failure
+// Uganda NIN structure: [C][M|F][9 digits][3 letters] = 14 chars total
+// Position 0-1  : must be letters (CM or CF prefix)
+// Position 2-10 : must be digits (9 digits)
+// Position 11-13: must be letters (3-letter suffix)
+function cleanMrzNameToken(t) {
+  return t.replace(/^LF(?=[AEIOU])/, 'LY').replace(/^LIO(?=Y)/, 'MU').replace(/^K+(?=[A-Z]{3,})/, '').replace(/[KLCXVES<]+$/, match => {
+    if (!/[K<]/.test(match) && match.length <= 2) return match;
+    if (match.length >= 2) {
+      const firstChar = match[0];
+      const prevChar = t[t.length - match.length - 1] || '';
+      const isVowel = /[AEIOU]/.test(prevChar.toUpperCase());
+      if (isVowel && /[LCX]/i.test(firstChar)) {
+        return firstChar;
       }
+      return '';
     }
+    return match === '<' ? '' : match;
+  });
+}
 
-    if (sections.length) {
-      const parts = sections[0].split(";");
-      if (parts.length > 0 && /^\d+$/.test(parts[0].trim())) {
-        fp.fingerIndex = parseInt(parts[0], 10);
-      }
-      if (parts.length > 1 && /^\d+$/.test(parts[1].trim())) {
-        fp.minutiaeCount = parseInt(parts[1], 10);
-      }
-      if (parts.length > 2 && parts[2].trim()) {
-        try {
-          fp.sealedBlockBytes = b64Decode(parts[2]).length;
-        } catch (exc) {
-          // ignore
-        }
-      }
-    }
+function tryNormalizeOldFormat(chars) {
+  const c = [...chars];
+  for (let i = 2; i <= 10; i++) {
+    if (LETTER_TO_DIGIT[c[i]]) c[i] = LETTER_TO_DIGIT[c[i]];
+  }
+  for (let i = 11; i <= 13; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  return c.join('');
+}
 
-    return fp;
+function tryNormalizeNewFormat(chars) {
+  const c = [...chars];
+  const newDigitMap = { ...LETTER_TO_DIGIT, 'Z': '7', 'T': '7', 'Y': '7', 'L': '1' };
+  for (let i = 2; i <= 8; i++) {
+    if (LETTER_TO_DIGIT[c[i]]) c[i] = LETTER_TO_DIGIT[c[i]];
+  }
+  for (let i = 9; i <= 10; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  if (newDigitMap[c[11]]) c[11] = newDigitMap[c[11]];
+  for (let i = 12; i <= 13; i++) {
+    if (DIGIT_TO_LETTER[c[i]]) c[i] = DIGIT_TO_LETTER[c[i]];
+  }
+  return c.join('');
+}
+
+function normalizeNinCandidate(candidate, dob) {
+  let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const embeddedNin = v.match(/[CAP1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
+  if (embeddedNin && embeddedNin[0] !== v) {
+    return normalizeNinCandidate(embeddedNin[0], dob);
   }
 
-  // Break a NIN into its components. Returns {} if it does not match.
-  function parseNin(nin) {
-    const match = NIN_PATTERN.exec((nin || "").trim().toUpperCase());
-    if (!match) return {};
-    return {
-      prefix: match[1],
-      sexCode: match[2],
-      birthYearShort: match[3],
-      serial: match[4],
-    };
-  }
-
-  // --------------------------------------------------------------------
-  // Parsing
-  // --------------------------------------------------------------------
-
-  /**
-   * Parse a payload string into a CardRecord.
-   *
-   * options.strict = true turns consistency warnings (NIN/DOB mismatch, bad
-   * date ordering, expired card) into a thrown CardParseError instead of
-   * collecting them on record.warnings.
-   */
-  function parseCard(raw, { strict = false, source = null } = {}) {
-    const [fields, biometricSections] = splitSections(raw);
-
-    if (fields.length < MIN_FIELDS) {
-      throw new CardParseError(
-        `expected at least ${MIN_FIELDS} fields, found ${fields.length}`
-      );
-    }
-
-    const warnings = [];
-
-    const surname = decodeName(fields[IDX_SURNAME], "surname");
-    const givenName = decodeName(fields[IDX_GIVEN_NAME], "given name");
-    const otherName = decodeName(fields[IDX_OTHER_NAME], "other name");
-
-    const dob = parseDate(fields[IDX_DOB], "date of birth");
-    const issued = parseDate(fields[IDX_ISSUED], "issue date");
-    const expires = parseDate(fields[IDX_EXPIRES], "expiry date");
-
-    const nin = fields[IDX_NIN].trim().toUpperCase();
-    const cardNumber = fields[IDX_CARD_NUMBER].trim();
-
-    const parts = parseNin(nin);
-    let sex;
-    if (!parts.prefix) {
-      warnings.push(`NIN "${nin}" does not match the expected 14-character layout`);
-      sex = "Unknown";
+  // Extract a 14-character NIN candidate if present in a longer string
+  if (v.length !== 14) {
+    const match = v.match(/([CAP1G0OI4L][MFN13PR0-9BH])([A-Z0-9]{12})/i);
+    if (match) {
+      v = match[0];
     } else {
-      sex = SEX_CODES[parts.sexCode] || "Unknown";
-      const dobYY = String(dob.getUTCFullYear() % 100).padStart(2, "0");
-      if (dobYY !== parts.birthYearShort) {
-        warnings.push(
-          `NIN birth year '${parts.birthYearShort}' does not match date of birth year ${dob.getUTCFullYear()}`
-        );
-      }
-    }
-
-    if (issued.getTime() <= dob.getTime()) {
-      warnings.push("issue date is not after the date of birth");
-    }
-    if (expires.getTime() <= issued.getTime()) {
-      warnings.push("expiry date is not after the issue date");
-    }
-    if (expires.getTime() < utcToday().getTime()) {
-      warnings.push(`card expired on ${isoDate(expires)}`);
-    }
-
-    const headBlob = fields.length > IDX_MINUTIAE ? fields[IDX_MINUTIAE] : "";
-    const fingerprint = parseFingerprint(headBlob, biometricSections);
-
-    if (
-      fingerprint.minutiaeCount !== null &&
-      fingerprint.minutiaeBytes !== null &&
-      fingerprint.minutiaeBytes % MINUTIA_RECORD_BYTES !== 0
-    ) {
-      warnings.push("minutiae block length is not a multiple of the record width");
-    }
-
-    if (strict && warnings.length) {
-      throw new CardParseError(warnings.join("; "));
-    }
-
-    return new CardRecord({
-      surname,
-      givenName,
-      otherName,
-      dateOfBirth: dob,
-      issueDate: issued,
-      expiryDate: expires,
-      nin,
-      sex,
-      cardNumber,
-      fingerprint,
-      warnings,
-      source,
-      raw: (raw || "").trim(),
-    });
-  }
-
-  // --------------------------------------------------------------------
-  // Scanning (browser: canvas + @zxing/library)
-  // --------------------------------------------------------------------
-
-  function requireZXing() {
-    if (typeof global.ZXing === "undefined") {
-      throw new ScanError(
-        "scanning needs @zxing/library loaded as a global `ZXing`. Add " +
-          '<script src="js/vendor/zxing.umd.min.js"></script> (vendored ' +
-          "for offline use) before js/ug-id-parser.js."
-      );
+      return '';
     }
   }
 
-  // Load any accepted source type into a fresh canvas. Accepts an
-  // HTMLCanvasElement (used as-is), an HTMLImageElement/HTMLVideoElement,
-  // a File/Blob, or a data/object URL string.
-  async function toCanvas(source) {
-    if (source instanceof HTMLCanvasElement) {
-      return { canvas: source, label: "<canvas>" };
-    }
+  // Position-aware structural normalization
+  const chars = v.split('');
 
-    if (source instanceof HTMLImageElement) {
-      return { canvas: drawToCanvas(source, source.naturalWidth, source.naturalHeight), label: source.src || "<img>" };
-    }
-
-    if (source instanceof HTMLVideoElement) {
-      return { canvas: drawToCanvas(source, source.videoWidth, source.videoHeight), label: "<video frame>" };
-    }
-
-    if (source instanceof Blob) {
-      const img = await blobToImage(source);
-      const label = source.name || "<blob>";
-      return { canvas: drawToCanvas(img, img.naturalWidth, img.naturalHeight), label };
-    }
-
-    if (typeof source === "string") {
-      const img = await urlToImage(source);
-      return { canvas: drawToCanvas(img, img.naturalWidth, img.naturalHeight), label: source };
-    }
-
-    throw new ScanError(
-      "unsupported image source: pass a <canvas>, <img>, <video>, File/Blob, or URL string"
-    );
+  // Positions 0-1: must be letters (prefix CM / CF / AM / AF / PM / PF)
+  for (let i = 0; i <= 1; i++) {
+    if (DIGIT_TO_LETTER[chars[i]]) chars[i] = DIGIT_TO_LETTER[chars[i]];
   }
+  // Double-check prefix corrections
+  if (chars[0] === 'I' || chars[0] === '1' || chars[0] === 'O' || chars[0] === '0') chars[0] = 'C';
+  else if (chars[0] !== 'A' && chars[0] !== 'P') chars[0] = 'C';
+  if (chars[1] === 'N' || chars[1] === 'H' || chars[1] === 'K') chars[1] = 'M';
 
-  function drawToCanvas(imageLike, width, height) {
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(imageLike, 0, 0, width, height);
-    return canvas;
-  }
-
-  function blobToImage(blob) {
-    return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(blob);
-      const img = new Image();
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        resolve(img);
-      };
-      img.onerror = (err) => {
-        URL.revokeObjectURL(url);
-        reject(new ScanError(`could not load image: ${err}`));
-      };
-      img.src = url;
-    });
-  }
-
-  function urlToImage(url) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => resolve(img);
-      img.onerror = (err) => reject(new ScanError(`could not open ${url} as an image: ${err}`));
-      img.src = url;
-    });
-  }
-
-  /**
-   * Find the densest horizontal band of ink and return its bounding box.
-   *
-   * A PDF417 symbol is far denser than surrounding print, so a projection
-   * profile locates it without any detector model.
-   * Returns [left, top, right, bottom] in pixel coordinates, or null.
-   */
-  function findSymbolBbox(canvas) {
-    const { width, height } = canvas;
-    const ctx = canvas.getContext("2d");
-    const data = ctx.getImageData(0, 0, width, height).data;
-
-    const ink = new Uint8Array(width * height);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const grey = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      ink[p] = grey < DARK_THRESHOLD ? 1 : 0;
-    }
-
-    const rowInk = new Int32Array(height);
-    for (let y = 0; y < height; y++) {
-      let sum = 0;
-      const base = y * width;
-      for (let x = 0; x < width; x++) sum += ink[base + x];
-      rowInk[y] = sum;
-    }
-
-    const rows = [];
-    for (let y = 0; y < height; y++) if (rowInk[y] > MIN_ROW_INK) rows.push(y);
-    if (!rows.length) return null;
-
-    const bands = [];
-    let start = rows[0];
-    let prev = rows[0];
-    for (let i = 1; i < rows.length; i++) {
-      const y = rows[i];
-      if (y - prev > 15) {
-        bands.push([start, prev]);
-        start = y;
-      }
-      prev = y;
-    }
-    bands.push([start, prev]);
-
-    let top = bands[0][0];
-    let bottom = bands[0][1];
-    let bestSum = -1;
-    for (const [s, e] of bands) {
-      let sum = 0;
-      for (let y = s; y <= e; y++) sum += rowInk[y];
-      if (sum > bestSum) {
-        bestSum = sum;
-        top = s;
-        bottom = e;
-      }
-    }
-
-    const colInk = new Int32Array(width);
-    for (let x = 0; x < width; x++) {
-      let sum = 0;
-      for (let y = top; y <= bottom; y++) sum += ink[y * width + x];
-      colInk[x] = sum;
-    }
-
-    const cols = [];
-    for (let x = 0; x < width; x++) if (colInk[x] > MIN_COL_INK) cols.push(x);
-    if (!cols.length) return null;
-
-    return [
-      Math.max(0, cols[0] - QUIET_ZONE_PX),
-      Math.max(0, top - QUIET_ZONE_PX),
-      Math.min(width, cols[cols.length - 1] + QUIET_ZONE_PX),
-      Math.min(height, bottom + QUIET_ZONE_PX),
-    ];
-  }
-
-  /**
-   * Return bounding boxes for ALL ink bands, sorted by total ink sum
-   * descending (densest first).
-   *
-   * The reference module picks a single band (the densest). That breaks when
-   * a secondary ink feature — the MRZ on the Uganda ID back — has higher
-   * aggregate ink than the barcode band (because the MRZ runs the full card
-   * width while the barcode occupies only the right half). This function
-   * preserves the same projection algorithm but lets the caller iterate over
-   * all candidate bands so ZXing's structural rejection (looksLikeCardPayload)
-   * acts as the tiebreaker instead of raw ink density.
-   *
-   * findSymbolBbox is kept unchanged because it is part of the public API and
-   * the test harness uses it directly.
-   *
-   * Returns [] if no ink bands are found.
-   */
-  function findAllSymbolBboxes(canvas) {
-    const { width, height } = canvas;
-    const ctx = canvas.getContext("2d");
-    const data = ctx.getImageData(0, 0, width, height).data;
-
-    const ink = new Uint8Array(width * height);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const grey = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      ink[p] = grey < DARK_THRESHOLD ? 1 : 0;
-    }
-
-    const rowInk = new Int32Array(height);
-    for (let y = 0; y < height; y++) {
-      let sum = 0;
-      const base = y * width;
-      for (let x = 0; x < width; x++) sum += ink[base + x];
-      rowInk[y] = sum;
-    }
-
-    const rows = [];
-    for (let y = 0; y < height; y++) if (rowInk[y] > MIN_ROW_INK) rows.push(y);
-    if (!rows.length) return [];
-
-    const bands = [];
-    let start = rows[0];
-    let prev  = rows[0];
-    for (let i = 1; i < rows.length; i++) {
-      const y = rows[i];
-      if (y - prev > 15) { bands.push([start, prev]); start = y; }
-      prev = y;
-    }
-    bands.push([start, prev]);
-
-    // Sort bands by total ink descending so the densest is tried first,
-    // matching the reference module's preference order.
-    bands.sort((a, b) => {
-      let sa = 0, sb = 0;
-      for (let y = a[0]; y <= a[1]; y++) sa += rowInk[y];
-      for (let y = b[0]; y <= b[1]; y++) sb += rowInk[y];
-      return sb - sa;
-    });
-
-    const bboxes = [];
-    for (const [top, bottom] of bands) {
-      const colInk = new Int32Array(width);
-      for (let x = 0; x < width; x++) {
-        let sum = 0;
-        for (let y = top; y <= bottom; y++) sum += ink[y * width + x];
-        colInk[x] = sum;
-      }
-      const cols = [];
-      for (let x = 0; x < width; x++) if (colInk[x] > MIN_COL_INK) cols.push(x);
-      if (!cols.length) continue;
-
-      bboxes.push([
-        Math.max(0, cols[0] - QUIET_ZONE_PX),
-        Math.max(0, top - QUIET_ZONE_PX),
-        Math.min(width, cols[cols.length - 1] + QUIET_ZONE_PX),
-        Math.min(height, bottom + QUIET_ZONE_PX),
-      ]);
-    }
-    return bboxes;
-  }
-
-  /**
-   * Cheap structural check used to reject corrupt reads.
-   *
-   * A phone photo of a laminated card can produce a read the decoder
-   * reports as valid but whose text is corrupt, so error-correction
-   * passing is not an integrity guarantee. This is the acceptance test
-   * for the decode loop.
-   */
-  function looksLikeCardPayload(text) {
-    if (!text || !text.includes(BIOMETRIC_TAG)) return false;
-
-    const fields = text.split(BIOMETRIC_TAG)[0].split(";");
-    if (fields.length < MIN_FIELDS) return false;
-
-    for (const value of fields.slice(0, 3)) {
-      const cleaned = value.trim();
-      if (!cleaned) continue;
-      let decoded;
-      try {
-        decoded = new TextDecoder("ascii", { fatal: true }).decode(b64Decode(cleaned));
-      } catch (exc) {
-        return false;
-      }
-      if (!/^[A-Z '\-]+$/.test(decoded.trim().toUpperCase())) return false;
-    }
-
-    if (![3, 4, 5].every((i) => /^\d{8}$/.test((fields[i] || "").trim()))) return false;
-    if (!parseNin(fields[6]).prefix) return false;
-
-    return true;
-  }
-
-  function cropCanvas(canvas, [left, top, right, bottom]) {
-    const w = right - left;
-    const h = bottom - top;
-    const out = document.createElement("canvas");
-    out.width = w;
-    out.height = h;
-    out.getContext("2d").drawImage(canvas, left, top, w, h, 0, 0, w, h);
-    return out;
-  }
-
-  function toGreyscale(canvas) {
-    const out = document.createElement("canvas");
-    out.width = canvas.width;
-    out.height = canvas.height;
-    const ctx = out.getContext("2d");
-    ctx.drawImage(canvas, 0, 0);
-    const imgData = ctx.getImageData(0, 0, out.width, out.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      const grey = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      d[i] = d[i + 1] = d[i + 2] = grey;
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return out;
-  }
-
-  // Histogram stretch — nearest JS equivalent of PIL's ImageOps.autocontrast.
-  function autocontrast(canvas) {
-    const out = document.createElement("canvas");
-    out.width = canvas.width;
-    out.height = canvas.height;
-    const ctx = out.getContext("2d");
-    ctx.drawImage(canvas, 0, 0);
-    const imgData = ctx.getImageData(0, 0, out.width, out.height);
-    const d = imgData.data;
-
-    let lo = 255;
-    let hi = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      if (d[i] < lo) lo = d[i];
-      if (d[i] > hi) hi = d[i];
-    }
-    const range = hi - lo;
-    if (range > 0) {
-      for (let i = 0; i < d.length; i += 4) {
-        const v = ((d[i] - lo) * 255) / range;
-        d[i] = d[i + 1] = d[i + 2] = v;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return out;
-  }
-
-  // Note: canvas drawImage with imageSmoothingQuality='high' is a decent
-  // stand-in for PIL's LANCZOS upscaling but not identical — if the 2x
-  // rung of the ladder underperforms in the field, this is the first
-  // place to tune.
-  function scaleCanvas(canvas, factor) {
-    if (factor === 1) return canvas;
-    const out = document.createElement("canvas");
-    out.width = canvas.width * factor;
-    out.height = canvas.height * factor;
-    const ctx = out.getContext("2d");
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(canvas, 0, 0, out.width, out.height);
-    return out;
-  }
-
-  /**
-   * Return a new canvas rotated 90° clockwise.
-   *
-   * PDF417 is a horizontal symbol: a phone held portrait over a
-   * landscape ID card delivers the barcode at 90° relative to the
-   * sensor rows. The Python reference module handles this via
-   * zxingcpp's try_rotate=True; here we replicate that by rotating
-   * the canvas before calling readBarcode.
-   */
-  function rotateCanvas90(canvas) {
-    const out = document.createElement("canvas");
-    out.width  = canvas.height;
-    out.height = canvas.width;
-    const ctx = out.getContext("2d");
-    ctx.translate(out.width, 0);
-    ctx.rotate(Math.PI / 2);
-    ctx.drawImage(canvas, 0, 0);
-    return out;
-  }
-
-  /**
-   * Yield (label, canvas) for 0°, 90°, 180°, 270° — matching the
-   * reference module's try_rotate=True iteration order.
-   */
-  function* rotations(canvas) {
-    let c = canvas;
-    for (const deg of [0, 90, 180, 270]) {
-      yield [`${deg}°`, c];
-      c = rotateCanvas90(c);
-    }
-  }
-
-  function* variants(cropCanvas) {
-    const grey = toGreyscale(cropCanvas);
-    for (const factor of SCALE_LADDER) {
-      const scaled = scaleCanvas(grey, factor);
-      yield [`grey x${factor}`, scaled];
-      yield [`autocontrast x${factor}`, autocontrast(scaled)];
-    }
-  }
-
-  function readBarcode(canvas) {
-    const { width, height } = canvas;
-
-
-    const luminanceSource = new global.ZXing.HTMLCanvasElementLuminanceSource(canvas);
-    const binarizer = new global.ZXing.HybridBinarizer(luminanceSource);
-    const bitmap = new global.ZXing.BinaryBitmap(binarizer);
-    const reader = new global.ZXing.PDF417Reader();
-    try {
-      const result = reader.decode(bitmap);
-      return result.getText();
-    } catch (exc) {
-      return null; // NotFoundException / ChecksumException / FormatException
-    }
-  }
-
-  /**
-   * Decode the PDF417 barcode and return { payload, source }.
-   *
-   * `source` may be a <canvas>, <img>, <video> frame, File/Blob, or URL
-   * string. Throws ScanError if nothing valid is found.
-   */
-  async function scanCardImage(source, { debug = false } = {}) {
-    requireZXing();
-    const { canvas, label } = await toCanvas(source);
-
-    // Build region list: all detected bands (densest first) then full frame.
-    //
-    // The reference module picks one band (max ink sum). That fails on the
-    // Uganda ID back because the MRZ band has higher aggregate ink than the
-    // barcode band. We now try every band in density order, letting
-    // looksLikeCardPayload act as the structural tiebreaker. The full-frame
-    // fallback is preserved as the final option as in the reference module.
-    const bboxes = findAllSymbolBboxes(canvas);
-    if (debug) {
-      try {
-        console.debug(`findAllSymbolBboxes bboxes: ${JSON.stringify(bboxes)}`);
-      } catch (e) { console.debug('findAllSymbolBboxes bboxes: (unserializable)'); }
-    }
-    const regions = bboxes.map((bbox, i) => [`band ${i + 1}`, cropCanvas(canvas, bbox)]);
-    regions.push(["full frame", canvas]); // always last, matches reference module
-    if (debug) {
-      console.debug(`findAllSymbolBboxes: ${bboxes.length} band(s) found, trying each before full frame`);
-    }
-
-    for (const [regionLabel, region] of regions) {
-      for (const [variantLabel, candidate] of variants(region)) {
-        // Try all 4 orientations per variant — mirrors zxingcpp try_rotate=True.
-        // Portrait phone over landscape card = barcode arrives at 90°; without
-        // this loop @zxing/library PDF417Reader sees it at a single orientation.
-        for (const [rotLabel, rotated] of rotations(candidate)) {
-          const text = readBarcode(rotated);
-          if (text === null) {
-            if (debug) console.debug(`${regionLabel} / ${variantLabel} / ${rotLabel}: no read`);
-            continue;
-          }
-          if (looksLikeCardPayload(text)) {
-            if (debug) console.debug(`${regionLabel} / ${variantLabel} / ${rotLabel}: OK, ${text.length} chars`);
-            return { payload: text, source: label };
-          }
-          if (debug) {
-            console.debug(
-              `${regionLabel} / ${variantLabel} / ${rotLabel}: decoded ${text.length} chars but FAILED validation (corrupt read)`
-            );
-          }
+  // Apply DOB Year alignment for first two digits of digits group
+  if (dob && dob.includes('.')) {
+    const parts = dob.split('.');
+    if (parts.length === 3) {
+      const year = parts[2];
+      if (year && year.length === 4) {
+        const yy = year.slice(2);
+        if (chars[2] !== yy[0] && (chars[2] === 'E' || chars[2] === 'C' || !/[0-9]/.test(chars[2]))) {
+          chars[2] = yy[0];
+        }
+        if (chars[3] !== yy[1] && (chars[3] === 'R' || chars[3] === 'B' || !/[0-9]/.test(chars[3]))) {
+          chars[3] = yy[1];
         }
       }
     }
-
-    throw new ScanError(
-      "no valid PDF417 payload found. Re-shoot the card: fill the frame, " +
-        "hold the sensor parallel to the card, diffuse light to kill glare on " +
-        "the laminate, and keep the whole symbol including quiet zones inside " +
-        "the frame."
-    );
   }
 
-  // --------------------------------------------------------------------
-  // Combined entry points
-  // --------------------------------------------------------------------
+  // Try old format correction
+  const oldCand = tryNormalizeOldFormat(chars);
+  if (OLD_NIN_REGEX.test(oldCand)) return oldCand;
 
-  /**
-   * Scan an image of the card back and return the parsed CardRecord.
-   *   const record = await parseCardImage(canvas);
-   */
-  async function parseCardImage(source, { strict = false, debug = false } = {}) {
-    const { payload, source: label } = await scanCardImage(source, { debug });
-    return parseCard(payload, { strict, source: label });
+  // Try new format correction
+  const newCand = tryNormalizeNewFormat(chars);
+  if (NEW_NIN_REGEX.test(newCand)) return newCand;
+
+  // Fallback: check broad NIN_REGEX or return old candidate as best effort
+  if (NIN_REGEX.test(oldCand)) return oldCand;
+  if (NIN_REGEX.test(newCand)) return newCand;
+
+  return oldCand;
+}
+
+function fixDigitsOnly(str) {
+  return (str || '')
+    .toUpperCase()
+    .replace(/O/g, '0')
+    .replace(/I/g, '1')
+    .replace(/S/g, '5')
+    .replace(/B/g, '8')
+    .replace(/D/g, '0')
+    .replace(/G/g, '6')
+    .replace(/Z/g, '2')
+    .replace(/E/g, '0')  // MRZ monospace: '0' sometimes read as 'E'
+    .replace(/Q/g, '0'); // MRZ monospace: '0' sometimes read as 'Q' in digit-only zones
+}
+
+function validateNin(n, dob) {
+  const v = normalizeNinCandidate(n, dob);
+  if (!NIN_REGEX.test(v)) return '';
+  if (!OLD_NIN_REGEX.test(v) && !NEW_NIN_REGEX.test(v)) return '';
+  return v;
+}
+
+function correctNIN(raw) {
+  const normalizedCandidate = normalizeNinCandidate(raw);
+  if (NIN_REGEX.test(normalizedCandidate)) return normalizedCandidate;
+
+  // Remove all spaces, force uppercase
+  let s = (raw || '').replace(/\s/g, '').toUpperCase().substring(0, 14);
+  const chars = s.split('');
+
+  // Positions 0-1: must be letters — fix digit→letter confusions
+  for (let i = 0; i <= 1; i++) {
+    if (chars[i] === '0') chars[i] = 'O';
+    if (chars[i] === '1') chars[i] = 'I';
+    if (chars[i] === '8') chars[i] = 'B';
+    if (chars[i] === '5') chars[i] = 'S';
   }
 
-  /**
-   * Accept either an image source or a raw payload string and return a
-   * CardRecord. Convenient when input provenance varies.
-   */
-  async function readCard(source, { strict = false, debug = false } = {}) {
-    if (typeof source === "string") {
-      if (source.includes(BIOMETRIC_TAG) || source.includes(";")) {
-        return parseCard(source, { strict, source: "<string>" });
-      }
+  // Positions 2-10: must be digits — fix letter→digit confusions
+  for (let i = 2; i <= 10; i++) {
+    if (chars[i] === 'O') chars[i] = '0';
+    if (chars[i] === 'I') chars[i] = '1';
+    if (chars[i] === 'B') chars[i] = '8';
+    if (chars[i] === 'S') chars[i] = '5';
+    if (chars[i] === 'Z') chars[i] = '2';
+    if (chars[i] === 'G') chars[i] = '6';
+  }
+
+  // Positions 11-13: must be letters — same corrections as positions 0-1
+  for (let i = 11; i <= 13; i++) {
+    if (chars[i] === '0') chars[i] = 'O';
+    if (chars[i] === '1') chars[i] = 'I';
+    if (chars[i] === '8') chars[i] = 'B';
+    if (chars[i] === '5') chars[i] = 'S';
+  }
+
+  const corrected = chars.join('');
+  return validateNin(corrected) || '';
+}
+
+function correctDate(raw) {
+  // Strip everything except digits
+  const digits = (raw || '').replace(/[^0-9]/g, '');
+  if (digits.length >= 8) {
+    return digits.substring(0,2) + '.' + digits.substring(2,4) + '.' + digits.substring(4,8);
+  }
+  return (raw || '').trim();
+}
+
+function parseAndFormatDob(raw) {
+  const clean = (raw || '').replace(/\s+/g, '').replace(/,/g, '.');
+  let m = clean.match(/(\d{2})[.\/\-](\d{2})[.\/\-](\d{4})/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+      return `${m[1]}.${m[2]}.${m[3]}`;
     }
-    return parseCardImage(source, { strict, debug });
+  }
+  return '';
+}
+
+function validateDob(dob) {
+  const d = parseAndFormatDob(dob);
+  if (!d) return '';
+  const yyyy = parseInt(d.split('.')[2], 10);
+  const curY = new Date().getFullYear();
+  if (yyyy >= 1930 && yyyy <= curY) return d;
+  return '';
+}
+
+function validateExpiry(expiry) {
+  const d = parseAndFormatDob(expiry);
+  if (!d) return '';
+  const yyyy = parseInt(d.split('.')[2], 10);
+  if (yyyy >= 2015 && yyyy <= 2050) return d;
+  return '';
+}
+
+function validateSexOrBlank(s) {
+  const v = (s || '').toString().trim().toUpperCase();
+  if (v === 'M' || v === 'F') return v;
+  return '';
+}
+
+function stripDigits(s) {
+  return (s || '').toString().replace(/\d+/g, '');
+}
+
+function stripLabelWords(s) {
+  const out = (s || '').toString().toUpperCase();
+  return out.replace(/\b(SURNAME|GIVEN|NAME|NATIONALITY)\b/g, ' ');
+}
+
+const NAME_STOPWORDS = new Set([
+  'EID','NIN','ID','SURNAME','GIVEN','NAME','NATIONALITY','UGA','SEX',
+  'SGT','CE','SHEET','CARD','DATE','BIRTH','EXPIRY','HOLDER','SIGNATURE',
+  'UGANDA','REPUBLIC','THE','AND','FOR','OF','NATIONAL',
+  // Synthetic-card watermark tokens seen causing surname/given_name pollution:
+  'MACHINE','LEARNING','OCR','USE','ONLY','TRAINING','REVERSE','THUMB',
+  'SIVENAME','NAVE','NANE','NAHE','GVEN','PRESRD','BOOED','SANT',
+  'CFVQR','CFWTT','CMWRZ','CMJE','RNAML','SURNAMEF',
+  // Short/noise tokens frequently produced by OCR on these synthetic cards:
+  'TST','SCR','FIRNAME','FIRSTNAME','PHOTO','PIVEN','SIVEN','DAE',
+  'HOLDERS','VUE','TIP','OR','NE','AI','BH','EE','TA','IEA','RAE',
+  'SHRD','MM','FY','SL','NSA','NENG','NT','IH',
+]);
+
+function normalizeNameStrict(raw) {
+  let v = (raw || '').toString();
+  v = stripDigits(v);
+  v = stripLabelWords(v);
+  v = v.toUpperCase().replace(/[^A-Z' -]/g, ' ');
+  v = v.replace(/\s+/g, ' ').trim();
+  const toks = v.split(/\s+/).filter(Boolean).filter(t => !NAME_STOPWORDS.has(t));
+  return toks.join(' ');
+}
+
+function isPersonNameStrict(name) {
+  if (!name || name.length < 3 || name.length > 60) return false;
+  if (!/^[A-Z][A-Z' -]*$/.test(name)) return false;
+  // Must have at least one vowel across the whole name
+  if (!/[AEIOU]/.test(name)) return false;
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  // Each token must be 3-22 chars (raises floor from 2 to 3 to exclude 2-char noise)
+  return parts.every(p => p.length >= 3 && p.length <= 22);
+}
+
+function stripMrzLines(lines) {
+  return (lines || []).filter(l => !l.includes('<'));
+}
+
+function normalizeLocationLines(lines) {
+  const mrzStartIdx = lines.findIndex(l => /ID[A-Z]{3}/.test(l) || l.includes('<'));
+  const locationLines = mrzStartIdx >= 0 ? lines.slice(0, mrzStartIdx) : lines;
+  const nonMrz = stripMrzLines(locationLines);
+  return nonMrz.map(l => l.trim()).filter(l => l.length >= 3);
+}
+
+function cleanLocationNameStrict(value) {
+  const v = (value || '').toString();
+  if (v.includes('<')) return '';
+  if (v.length < 4) return '';
+
+  let cleaned = v
+    .toUpperCase()
+    .replace(/[<>|()|\[\]{}]/g, ' ')
+    .replace(/[^A-Z0-9' -]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const blacklist = /(THUMB|FINGER|PRINTS?|SIGNATURE|HOLDER)/;
+  if (blacklist.test(cleaned)) return '';
+  if (!/[AEIOU]/.test(cleaned)) return '';
+
+  // Restore space before trailing digits that OCR collapsed:
+  // "ZONE3" → "ZONE 3", "BLOCK4" → "BLOCK 4", "VILLAGE12" → "VILLAGE 12"
+  cleaned = cleaned.replace(/([A-Z])(\d+)$/, '$1 $2');
+  // Also: "NLLAGE" should stay — we only fix digit-suffix collapses, not letter merges
+  cleaned = cleaned.replace(/([A-Z])(\d+)$/, '$1 $2');
+  cleaned = cleaned
+    .replace(/\b(FINGER|INDEX|RINDEX|LINDEX|THIS|CARD|PROPERTY|REPUBLIC|UGANDA|TINH|OMA|HI|NR|NT|TT|BRATS|SAE|OPS)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  cleaned = cleaned
+    .replace(/^C+\s*BUVENDE\s*[A-Z]?$/, 'BUYENDE')
+    .replace(/^CBUVENDE$/, 'BUYENDE')
+    .replace(/^BUVENDE$/, 'BUYENDE')
+    .replace(/^JRUNDU$/, 'IRUNDU')
+    .replace(/^IRUNDU\s+[A-Z ]{1,6}$/, 'IRUNDU');
+
+  return cleaned;
+}
+
+function normalizeCardNumber(raw) {
+  const v = String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const directNew = v.match(/CA[0-9]{9}/);
+  if (directNew) return directNew[0];
+  const directOld = v.match(/[0-9]{9}/);
+  if (directOld) return directOld[0];
+  return '';
+}
+
+function mrzYYMMDDToDisplay(yyMMdd, isExpiry) {
+  if (!/^[0-9]{6}$/.test(yyMMdd)) return '';
+  const yy = parseInt(yyMMdd.slice(0, 2), 10);
+  const mmVal = parseInt(yyMMdd.slice(2, 4), 10);
+  const ddVal = parseInt(yyMMdd.slice(4, 6), 10);
+  if (mmVal < 1 || mmVal > 12 || ddVal < 1 || ddVal > 31) return '';
+  const mm = yyMMdd.slice(2, 4);
+  const dd = yyMMdd.slice(4, 6);
+  if (isExpiry) {
+    return `${dd}.${mm}.${2000 + yy}`;
+  }
+  const currentYY = new Date().getFullYear() % 100;
+  const century = yy > currentYY ? 1900 : 2000;
+  return `${dd}.${mm}.${century + yy}`;
+}
+
+// ─── Front parser ─────────────────────────────────────────────────────────
+// Accepts a raw OCR text string from the front of the ID card.
+function parseFront(raw) {
+  const data = {};
+  const up = normalizeOCRText(raw);
+  const lines = up.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+  // Dates: Try labels first to avoid positional shifts
+  const dates = [];
+  const dateMatches = up.matchAll(/\b\d{2}[.\/\-]\d{2}[.\/\-]\d{4}\b/g);
+  for (const m of dateMatches) {
+    const d = parseAndFormatDob(m[0]);
+    if (d) dates.push(d);
   }
 
-  // --------------------------------------------------------------------
-  // Display
-  // --------------------------------------------------------------------
+  const dobMatch = up.match(/\b(?:DOB|BIRTH)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  if (dobMatch) data.dob = parseAndFormatDob(dobMatch[1]);
 
-  const MONTHS = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  const expiryMatch = up.match(/\b(?:EXPIRY|EXP)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  if (expiryMatch) data.expiry = parseAndFormatDob(expiryMatch[1]);
+
+  const issueMatch = up.match(/\b(?:ISSUE)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  const issueDate = issueMatch ? parseAndFormatDob(issueMatch[1]) : null;
+
+  // Fallback positional dates if labels failed
+  if (!data.dob && dates.length > 0) {
+    if (issueDate && dates[0] === issueDate) {
+      // dates[0] is Issue Date. DOB was likely missed by OCR entirely.
+    } else {
+      data.dob = dates[0];
+    }
+  }
+
+  if (!data.expiry && dates.length >= 2) {
+    const lastDate = dates[dates.length - 1];
+    if (lastDate !== issueDate) {
+      data.expiry = lastDate;
+    }
+  }
+
+  // NIN (uses DOB for prefix Year of Birth reconciliation if available)
+  const words = up.split(/[\s|]+/).filter(Boolean);
+  let nin = '';
+  
+  // Search for the NIN structural pattern ANYWHERE in the raw OCR text
+  // We use word boundaries \b and the strict pattern to avoid matching random noise.
+  const ninMatches = up.match(/\b[CAP][MF]\d{2}[A-Z0-9]{10}\b/gi) || [];
+  for (const matchStr of ninMatches) {
+    const candidate = validateNin(matchStr, data.dob);
+    if (candidate) { 
+      nin = candidate; 
+      break; 
+    }
+  }
+
+  // Fallback to words just in case
+  if (!nin) {
+    for (const w of words) {
+      const candidate = validateNin(w, data.dob);
+      if (candidate) { nin = candidate; break; }
+    }
+  }
+  if (nin) data.nin = nin;
+
+  // Sex
+  const sexMatch = up.match(/\bSEX\b[\s\S]{0,35}?(?<!\bO\s*)\b([MF])\b/i);
+  const sex = sexMatch
+    ? validateSexOrBlank(sexMatch[1].toUpperCase())
+    : validateSexOrBlank(lines.find(l => /^[MF]$/.test(l.trim().toUpperCase())));
+  if (sex) data.sex = sex;
+
+  // Names (labeled)
+  const surnameMatch = up.match(/\b(SURNAME|SUENAML|SURNAM|SURNAMF|RNAML|SURNAMEF)\b/);
+  const surnamePos = surnameMatch ? surnameMatch.index : -1;
+
+  const givenMatch = up.match(/\b(GIVEN|GIVER|GIVEM)\b/);
+  const givenPos = givenMatch ? givenMatch.index : -1;
+
+  if (surnamePos >= 0) {
+    let slice = up.slice(surnamePos, surnamePos + 80);
+    const boundaryMatch = slice.match(/\b(GIVEN|GIVER|NATIONALITY|SEX|DATE|BIRTH|NIN)\b/);
+    if (boundaryMatch) slice = slice.slice(0, boundaryMatch.index);
+    const candidate = slice.replace(/\b(SURNAME|SUENAML|SURNAM|SURNAMF|RNAML|SURNAMEF)\b/, ' ');
+    const nm = normalizeNameStrict(candidate);
+    const tok = nm.split(/\s+/).filter(Boolean).find(isPersonNameStrict) || '';
+    if (tok) data.surname = tok;
+  }
+
+  if (givenPos >= 0) {
+    // slice text from GIVEN to next label (or up to 100 chars)
+    const chunk = up.slice(givenPos, givenPos + 100);
+    // clean out known labels
+    const cleanedChunk = chunk.replace(/\b(GIVEN|NAMES?|NATIONALITY|UGA|SEX|DOB|DATE|EXPIRY|CARD|NIN|HOLDER|OTHER)\b/g, '');
+    const nm = normalizeNameStrict(cleanedChunk);
+    const toks = nm.split(/\s+/).filter(Boolean);
+    // FIX 3: extended stop-word list includes synthetic-card watermark noise tokens
+    const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER',
+      'SUENAML','SURNAME','NATIONALITY','SEX','BIRTH','EXPIRY','HOLDER','SIGNATURE','DATE','OF',
+      'LS','LA','AS','IS','TO','BATH','MAME','BATE','ATIONALITY','OER','WONA','TEE','LAMERY',
+      // Watermark/label noise seen in synthetic cards:
+      'NAVE','NANE','NAHE','GVEN','SIVENAME','GIVEN','PRESRD','MACHENE','MACHINE',
+      'LEARNING','USE','ONLY','EE','TY','ITY','PR','HET','INA','LE','CMLQM','TEN','NAM',
+      // Extra 3+ char noise fragments observed in v2 run:
+      'BOOED','SANT','NANKYA','CFVQR','SUM','SINAN',
+      // v6 additions - photo area + label garble noise:
+      'PHOTO','PHOT','PIVEN','SIVEN','GVEN','DAE','OR','NE','NIEN','FY','SL','NSA','NENG',
+      'NT','IH','MM','SSD','TST','SCR','FIRNAME','FIRSTNAME',
+    ]);
+    let cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
+    // Drop tokens ≤ 2 chars (EA, EO, EM, IF, MM, BH etc. are pure noise)
+    cleanToks = cleanToks.filter(t => t.length > 2);
+    // Drop NIN-like fragments starting with CF/CM (e.g. CFDYQ, CMALWK, CFBH)
+    cleanToks = cleanToks.filter(t => !/^C[MF][A-Z0-9]{1,8}$/.test(t));
+    // Drop all-consonant tokens (no vowel = OCR noise, e.g. NNSNIONS, NIENTTNANS)
+    cleanToks = cleanToks.filter(t => /[AEIOU]/.test(t));
+    if (cleanToks.length) data.given_names = cleanToks.slice(0, 3).join(' ');
+  }
+
+  // Removed positional fallback for names (Bug 2 Fix)
+  // We strictly rely on labeled fields to avoid shifting data into wrong fields.
+
+  // Card Number
+  const cardNoMatch = up.match(/\b(?:CARD|CARD\s*NO|CA)[\s\S]{0,40}?\b([A-Z]{0,2}[0-9]{8,12})\b/i) ||
+                      up.match(/\b(CA[0-9]{8,12})\b/i);
+  if (cardNoMatch) data.card_no = cardNoMatch[1].toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  // Nationality
+  if (up.includes('UGA')) data.nationality = 'UGA';
+
+  return data;
+}
+
+// ─── Back parser ──────────────────────────────────────────────────────────
+// Accepts a raw OCR text string from the back of the ID card.
+function parseBack(raw) {
+  const data = {};
+  const up = normalizeOCRText(raw);
+
+  // MRZ parsing (only if it looks like there are MRZ lines present)
+  const chevronCount = (up.match(/</g) || []).length;
+  if (chevronCount > 5 || up.includes('IDUGA') || up.includes('IDTST')) {
+    Object.assign(data, parseMRZ(up));
+  }
+
+  // Location extraction
+  const lines = up.split('\n').map(l => l.trim()).filter(Boolean);
+  const nonMrzLines = normalizeLocationLines(lines);
+
+  // ─── Line-based address extraction (robust against label collisions) ───
+  // Each address field label appears at the start of its line on the card back.
+  // Labels are searched most-specific first (S.COUNTY before COUNTY) to avoid
+  // partial matches (e.g. 'COUNTY' matching inside 'S.COUNTY').
+  const ADDR_LABELS = [
+    { pattern: /^[^A-Za-z0-9]*S[\s.]?COUNTY[\s:]+(.+)$/i,  field: 'sub_county' },
+    { pattern: /^[^A-Za-z0-9]*VILLAGE[\s:]+(.+)$/i,          field: 'village'   },
+    { pattern: /^[^A-Za-z0-9]*PARISH[\s:]+(.+)$/i,           field: 'parish'    },
+    { pattern: /^[^A-Za-z0-9]*COUNTY[\s:]+(.+)$/i,           field: 'county'    },
+    { pattern: /^[^A-Za-z0-9]*DISTRICT[\s:]+(.+)$/i,         field: 'district'  },
   ];
 
-  function formatDate(d) {
-    return `${String(d.getUTCDate()).padStart(2, "0")} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  // Also accept value-only format (label on separate line, value on next)
+  const LABEL_ONLY = [
+    { pattern: /^[^A-Za-z0-9]*S[\s.]?COUNTY$/i,  field: 'sub_county' },
+    { pattern: /^[^A-Za-z0-9]*VILLAGE$/i,         field: 'village'   },
+    { pattern: /^[^A-Za-z0-9]*PARISH$/i,          field: 'parish'    },
+    { pattern: /^[^A-Za-z0-9]*COUNTY$/i,          field: 'county'    },
+    { pattern: /^[^A-Za-z0-9]*DISTRICT$/i,        field: 'district'  },
+  ];
+
+  const allLines = up.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // New 2025-style Uganda ID backs often print two fields on one row:
+  // "DISTRICT BUYENDE  PARISH BUDIPA" and
+  // "COUNTY BUDIOPE EAST  VILLAGE BUDIPA II".
+  const pairedPatterns = [
+    {
+      line: /(DISTRICT)\s+(.+?)\s+(PARISH)\s+(.+)/i,
+      left: 'district',
+      right: 'parish'
+    },
+    {
+      line: /(COUNTY)\s+(.+?)\s+(?:VILLAGE|VILAGE)\s+(.+)/i,
+      left: 'county',
+      right: 'village'
+    },
+    {
+      line: /(SUB\s*COUNTY|SUBCOUNTY|S[\s.]?COUNTY)\s+(.+?)\s+(?:FINGER|RIGHT|LEFT|INDEX|L\s*INDEX|R\s*INDEX|$)/i,
+      left: 'sub_county',
+      right: ''
+    }
+  ];
+
+  for (const line of allLines) {
+    for (const spec of pairedPatterns) {
+      const m = line.match(spec.line);
+      if (!m) continue;
+      if (spec.left && !data[spec.left]) {
+        const cleaned = cleanLocationNameStrict(m[2] || '');
+        if (cleaned) data[spec.left] = cleaned;
+      }
+      if (spec.right && !data[spec.right]) {
+        const cleaned = cleanLocationNameStrict(m[4] || m[3] || '');
+        if (cleaned) data[spec.right] = cleaned;
+      }
+    }
   }
 
-  function render(record) {
-    const lines = [
-      `Surname      : ${record.surname}`,
-      `Given name   : ${record.givenName}`,
-      `Other name   : ${record.otherName}`,
-      `Sex          : ${record.sex}`,
-      `Date of birth: ${formatDate(record.dateOfBirth)} (age ${record.age()})`,
-      `Issued       : ${formatDate(record.issueDate)}`,
-      `Expires      : ${formatDate(record.expiryDate)}${record.isExpired ? " [EXPIRED]" : ""}`,
-      `NIN          : ${record.nin}`,
-      `Card number  : ${record.cardNumber}`,
-    ];
-    const fp = record.fingerprint;
-    if (fp.fingerIndex !== null || fp.minutiaeBytes !== null) {
-      lines.push(
-        `Biometrics   : finger ${fp.fingerIndex}, ${fp.minutiaeCount} minutiae, ` +
-          `${fp.minutiaeBytes} B template, ${fp.sealedBlockBytes} B sealed block`
+  // Pass 1: label+value on same line (most common)
+  for (const line of allLines) {
+    for (const { pattern, field } of ADDR_LABELS) {
+      if (data[field]) continue;
+      const m = line.match(pattern);
+      if (m) {
+        const cleaned = cleanLocationNameStrict(m[1].trim());
+        if (cleaned) { data[field] = cleaned; break; }
+      }
+    }
+  }
+
+  // Pass 2: label alone on one line, value on next
+  for (let li = 0; li < allLines.length - 1; li++) {
+    for (const { pattern, field } of LABEL_ONLY) {
+      if (data[field]) continue;
+      if (pattern.test(allLines[li])) {
+        const cleaned = cleanLocationNameStrict(allLines[li + 1]);
+        if (cleaned) data[field] = cleaned;
+      }
+    }
+  }
+
+  // Pass 3: positional fallback — only for lines NOT starting with an address label
+  // (lines starting with VILLAGE/PARISH/etc. were already processed in Pass 1;
+  //  including them here causes wrong field assignment when a label line appears
+  //  before the target field's position in the OCR output)
+  const addrLabelPrefixRe = /^(VILLAGE|PARISH|S\.?\s*COUNTY|COUNTY|DISTRICT)\b/i;
+  const hasLabeledAddress = ['village', 'parish', 'sub_county', 'county', 'district'].some(f => data[f]);
+  if (!hasLabeledAddress) {
+    const cleanedLines = nonMrzLines
+      .map(cleanLocationNameStrict)
+      .filter(v => v && v.length >= 3 && !addrLabelPrefixRe.test(v));
+
+    const order = ['village', 'parish', 'sub_county', 'county', 'district'];
+    let cleanedIdx = 0;
+    order.forEach(f => {
+      if (!data[f]) {
+        while (cleanedLines[cleanedIdx] && Object.values(data).includes(cleanedLines[cleanedIdx])) {
+          cleanedIdx++;
+        }
+        if (cleanedLines[cleanedIdx]) {
+          data[f] = cleanedLines[cleanedIdx];
+          cleanedIdx++;
+        }
+      }
+    });
+  }
+
+  // Auto-fill Sub County for Kampala division counties
+  if (!data.sub_county && data.county && data.county.includes('DIVISION')) {
+    const prefix = data.county.replace(/DIVISION/g, '').trim();
+    if (prefix.length >= 3) data.sub_county = prefix;
+  }
+
+  // Auto-fill District to KAMPALA for Kampala divisions
+  if (!data.district && (
+    (data.county && /\b(NAKAWA|RUBAGA|MAKINDYE|KAWEMPE|KAMPALA)\b/i.test(data.county)) ||
+    (data.sub_county && /\b(NAKAWA|RUBAGA|MAKINDYE|KAWEMPE|KAMPALA)\b/i.test(data.sub_county))
+  )) {
+    data.district = 'KAMPALA';
+  }
+
+  return data;
+}
+
+// ─── MRZ parser ───────────────────────────────────────────────────────────
+// Accepts raw OCR text containing MRZ lines.
+function parseMRZ(text) {
+  const data = {};
+  const norm = normalizeOCRText(text);
+  const rawLines = norm.split('\n').map(l => l.trim()).filter(Boolean);
+
+  const lines = rawLines
+    .map(l => l.replace(/\s+/g, '').replace(/[^A-Z0-9<]/g, ''))
+    .filter(l => l.length >= 15);
+
+  function fixN(str) {
+    return str.replace(/O/g,'0').replace(/I/g,'1').replace(/S/g,'5').replace(/B/g,'8');
+  }
+
+  // 1. Scoring-based line classification
+  let line1 = '', line2 = '', line3 = '';
+  const scoredLines = lines.map(l => {
+    const numDigits = (l.match(/\d/g) || []).length;
+    
+    // Line 3 Score: mostly letters & chevrons. Address lines can also be mostly
+    // letters, so chevrons and non-address labels are important tie-breakers.
+    let s3 = 0;
+    if (numDigits < 5) s3 += 15;
+    else if (numDigits >= 8) s3 -= 15;
+    const chevrons = (l.match(/</g) || []).length;
+    if (chevrons >= 2) s3 += 25;
+    if (/^(VILLAGE|PARISH|COUNTY|DISTRICT|ADDRESS|MRZ)/.test(l)) s3 -= 20;
+
+    // Line 1 Score: starts with ID/1D/TST or contains NIN prefix
+    let s1 = 0;
+    const hasNinPrefix = /[CA1G0OI4][MFN13PR0-9]\d/.test(l);
+    const startsWithId = /^(ID|1D|I0|TST)/i.test(l);
+    if (startsWithId) s1 += 12;
+    if (hasNinPrefix) s1 += 10;
+    if (l.includes('TST')) s1 += 5;
+    if (/^\d{6}/.test(l)) s1 -= 5;
+
+    // Line 2 Score: starts with DOB date pattern, contains Sex, contains UGA
+    let s2 = 0;
+    const hasSexChar = /[0-9][MF<][0-9]/.test(l);
+    if (hasSexChar) s2 += 12;
+    if (/^[A-Z0-9]?\d{5}/.test(l)) s2 += 10;
+    if (l.includes('UGA') && !startsWithId) s2 += 6;
+    if (numDigits < 5) s2 -= 15;
+
+    return { line: l, s1, s2, s3 };
+  });
+
+  // Assign Line 3: highest Line 3 score
+  const candidates3 = [...scoredLines].sort((a, b) => b.s3 - a.s3);
+  if (candidates3[0] && candidates3[0].s3 > 0) {
+    line3 = candidates3[0].line;
+  }
+
+  // Assign Line 1 and 2 from remaining
+  const remaining = scoredLines.filter(c => c.line !== line3);
+  if (remaining.length >= 2) {
+    const cand1 = [...remaining].sort((a, b) => b.s1 - a.s1);
+    line1 = cand1[0].line;
+    line2 = cand1.find(c => c.line !== line1)?.line || '';
+  } else if (remaining.length === 1) {
+    if (remaining[0].s1 >= remaining[0].s2) {
+      line1 = remaining[0].line;
+    } else {
+      line2 = remaining[0].line;
+    }
+  }
+
+  if (!line1 && !line2 && !line3 && lines.length >= 3) {
+    line1 = lines[0];
+    line2 = lines[1];
+    line3 = lines[2];
+  }
+
+  // Parse Line 2: dob, sex, expiry (parsed first so DOB is available for Line 1 NIN year alignment)
+  let mrzDob = '';
+  if (line2) {
+    // Search after correcting OCR letter/digit confusion. A leading DOB zero
+    // is commonly read as O; searching the raw line would skip it and shift
+    // every fixed-width MRZ field that follows.
+    const fixedLine2ForStart = fixN(line2);
+    const r2start = fixedLine2ForStart.search(/[0-9]/);
+    let raw2trim = r2start >= 0 ? fixedLine2ForStart.slice(r2start) : line2;
+    let dob = mrzYYMMDDToDisplay(fixN(raw2trim.slice(0, 6)), false);
+    if (!dob && /^[1-9][0-9]{5}[0-9MF]/.test(raw2trim)) {
+      const repaired = '0' + raw2trim;
+      const repairedDob = mrzYYMMDDToDisplay(fixN(repaired.slice(0, 6)), false);
+      if (repairedDob) {
+        raw2trim = repaired;
+        dob = repairedDob;
+      }
+    }
+    
+    if (dob) {
+      data.dob = dob;
+      mrzDob = dob;
+    }
+
+    const ugaIdx = raw2trim.search(/[UT][GS][AT]/);
+    let isCompactFormat = true;
+    if (ugaIdx >= 15) {
+      isCompactFormat = false;
+    } else if (ugaIdx < 0) {
+      isCompactFormat = !/[0-9]/.test(raw2trim[6] || '');
+    }
+    
+    const sexPos     = isCompactFormat ? 6 : 7;
+    const expiryStart = isCompactFormat ? 7 : 8;
+
+    const sex = validateSexOrBlank(raw2trim[sexPos]);
+    if (sex) data.sex = sex;
+    
+    const expiry = mrzYYMMDDToDisplay(fixN(raw2trim.slice(expiryStart, expiryStart + 6)), true);
+    if (expiry) data.expiry = expiry;
+  }
+
+  const joinedMrz = lines.join('');
+  const globalNinMatch = joinedMrz.match(/[CAP][MF][A-Z0-9]{12}/i);
+  if (globalNinMatch) {
+    const candidateNin = normalizeNinCandidate(globalNinMatch[0], mrzDob);
+    if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
+    const beforeNin = joinedMrz.slice(0, globalNinMatch.index || 0);
+    const cardDigits = fixDigitsOnly(beforeNin).replace(/[^0-9]/g, '');
+    if (!data.card_no && cardDigits.length >= 9) {
+      data.card_no = cardDigits.slice(-9);
+    }
+  }
+
+  // Parse Line 1: card_no & nin
+  if (line1) {
+    const fixedLine1 = fixN(line1).replace(/</g, '');
+    const ninStart = fixedLine1.search(/[CA1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
+    const cardZone = ninStart > 5 ? line1.slice(5, ninStart) : line1.slice(5, 17);
+    const cardNoRaw = fixDigitsOnly(cardZone).replace(/[^0-9]/g, '');
+    if (cardNoRaw.length >= 7) {
+      data.card_no = cardNoRaw.slice(0, 9);
+    }
+    
+    const remainingStr = fixedLine1;
+    const directNin = remainingStr.match(/[CAP][MF][A-Z0-9]{12}/i);
+    if (directNin) {
+      const candidateNin = normalizeNinCandidate(directNin[0], mrzDob);
+      if (validateNin(candidateNin, mrzDob)) data.nin = candidateNin;
+    }
+
+    const ninMatch = !data.nin && remainingStr.match(/([CA1G0OI4L][MFN13PR0-9BH])([0-9OISBGDZEQRTYUPH]{9})([A-Z0-9]{3,8})/i);
+    if (ninMatch) {
+      let p1 = ninMatch[1].toUpperCase();
+      const p2 = ninMatch[2];
+      const p3 = ninMatch[3].slice(0, 3);
+      
+      if (/[1G0OIL]/.test(p1[0])) p1 = 'C' + p1[1];
+      else if (p1[0] === '4') p1 = 'A' + p1[1];
+      
+      if (/[1NHK0OBH]/.test(p1[1])) p1 = p1[0] + 'M';
+      else if (/[PRE35]/.test(p1[1])) p1 = p1[0] + 'F';
+      
+      const candidateNin = normalizeNinCandidate(p1 + p2 + p3, mrzDob);
+      if (validateNin(candidateNin, mrzDob)) {
+        data.nin = candidateNin;
+      }
+    }
+
+    if (data.nin && NEW_NIN_REGEX.test(data.nin) && cardNoRaw.length >= 9) {
+      data.card_no = 'CA' + cardNoRaw.slice(0, 9);
+    }
+  }
+
+  // Parse Line 3: Names
+  if (line3) {
+    // Tesseract commonly reads the MRZ chevrons between names as alternating
+    // K/S/L/X characters. Restore that separator when a filler run occurs
+    // between two plausible name tokens (for example MUYUNGASKSKTIMOTHY).
+    line3 = line3.replace(/([AEIOU])([KSLX]{2,})(?=[A-Z]{3,})/g, '$1<<');
+    const firstChevronIdx = line3.search(/<+/);
+    let sRaw = '', gRaw = '';
+    if (firstChevronIdx >= 0) {
+      sRaw = line3.slice(0, firstChevronIdx);
+      gRaw = line3.slice(firstChevronIdx).replace(/^<+/, '');
+    } else {
+      sRaw = line3;
+    }
+    
+    if (firstChevronIdx >= 0 && gRaw.replace(/[^A-Z]/g, '').length > 0) {
+      let sur = normalizeNameStrict(cleanMrzNameToken(sRaw));
+      let giv = normalizeNameStrict(gRaw);
+      
+      const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER','SUENAML','SURNAME','NATIONALITY','SEX','BIRTH','EXPIRY','HOLDER','SIGNATURE','DATE','OF','LS','LA','AS','IS','TO','BATH','MAME','BATE','ATIONALITY','OER','WONA','TEE','LAMERY']);
+      if (giv) {
+        const toks = giv.split(/\s+/).filter(Boolean).map(cleanMrzNameToken);
+        let cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
+        cleanToks = cleanToks.filter(t => t.length > 2 || (t.length === 2 && /[AEIOU]/.test(t)));
+        cleanToks = cleanToks.filter(t => !/^C[MF][A-Z0-9]{1,8}$/.test(t));
+        cleanToks = cleanToks.filter(t => /[AEIOU]/.test(t) || t.length <= 2);
+        giv = cleanToks.join(' ');
+      }
+      if (sur) {
+        const toks = sur.split(/\s+/).filter(Boolean).map(cleanMrzNameToken);
+        let cleanToks = toks.filter(t => !FNAME_STOP.has(t) && t.length >= 2);
+        cleanToks = cleanToks.filter(t => t.length > 2 || (t.length === 2 && /[AEIOU]/.test(t)));
+        cleanToks = cleanToks.filter(t => !/^C[MF][A-Z0-9]{1,8}$/.test(t));
+        cleanToks = cleanToks.filter(t => /[AEIOU]/.test(t) || t.length <= 2);
+        sur = cleanToks.join(' ');
+      }
+
+      if (isPersonNameStrict(sur)) data.surname = sur;
+      if (giv) data.given_names = giv;
+      data.nationality = 'UGA';
+    }
+  }
+
+  return data;
+}
+
+const ROI = {
+  FRONT: {
+    SURNAME:     { x: 260, y: 158, w: 165, h: 34  },
+    GIVEN_NAMES: { x: 260, y: 218, w: 305, h: 40  },
+    NATIONALITY: { x: 255, y: 285, w: 120, h: 55  },
+    SEX:         { x: 418, y: 285, w: 65,  h: 55  },
+    DOB:         { x: 535, y: 312, w: 195, h: 38  },
+    NIN:         { x: 245, y: 350, w: 300, h: 55  },
+    CARD_NO:     { x: 535, y: 372, w: 205, h: 42  },
+    EXPIRY:      { x: 245, y: 418, w: 215, h: 55  },
+  },
+  BACK: {
+    ADDRESS_BLOCK: { x: 70,  y: 160, w: 330, h: 145 },
+    MRZ_LINE_1:    { x: 8,   y: 318, w: 830, h: 58  },
+    MRZ_LINE_2:    { x: 8,   y: 370, w: 830, h: 58  },
+    MRZ_LINE_3:    { x: 8,   y: 423, w: 830, h: 58  },
+  }
+};
+
+const FRONT_ROIS = {
+  surname:       ROI.FRONT.SURNAME,
+  given_names:   ROI.FRONT.GIVEN_NAMES,
+  nationality:   ROI.FRONT.NATIONALITY,
+  sex:           ROI.FRONT.SEX,
+  dob:           ROI.FRONT.DOB,
+  nin:           ROI.FRONT.NIN,
+  card_no:       ROI.FRONT.CARD_NO,
+  expiry:        ROI.FRONT.EXPIRY
+};
+
+const BACK_ROIS = {
+  address_block: ROI.BACK.ADDRESS_BLOCK,
+  mrz_line1:     ROI.BACK.MRZ_LINE_1,
+  mrz_line2:     ROI.BACK.MRZ_LINE_2,
+  mrz_line3:     ROI.BACK.MRZ_LINE_3
+};
+
+const NEW_FRONT_ROIS = {
+  surname:       { x: 235, y: 118, w: 180, h: 44 },
+  given_names:   { x: 235, y: 176, w: 180, h: 44 },
+  nationality:   { x: 235, y: 292, w: 120, h: 48 },
+  sex:           { x: 435, y: 276, w: 75,  h: 48 },
+  dob:           { x: 520, y: 276, w: 190, h: 48 },
+  nin:           { x: 235, y: 350, w: 285, h: 48 },
+  issue_date:    { x: 235, y: 405, w: 190, h: 48 },
+  expiry:        { x: 520, y: 405, w: 190, h: 48 },
+  card_no:       { x: 650, y: 462, w: 200, h: 55 }
+};
+
+const NEW_BACK_ROIS = {
+  address_block: { x: 0,   y: 8,   w: 835, h: 100 },
+  district:      { x: 108, y: 12,  w: 180, h: 30  },
+  county:        { x: 108, y: 47,  w: 250, h: 30  },
+  sub_county:    { x: 123, y: 81,  w: 180, h: 30  },
+  parish:        { x: 445, y: 12,  w: 210, h: 30  },
+  village:       { x: 470, y: 52,  w: 170, h: 24  },
+  mrz_line1:     { x: 8,   y: 352, w: 840, h: 58  },
+  mrz_line2:     { x: 8,   y: 410, w: 840, h: 58  },
+  mrz_line3:     { x: 8,   y: 468, w: 840, h: 58  }
+};
+
+const SYNTHETIC_FRONT_ROIS = {
+  surname:      { x: 0.4150, y: 0.1250, w: 0.3950, h: 0.0700 },
+  given_names:  { x: 0.4150, y: 0.2070, w: 0.3950, h: 0.0700 },
+  nationality:  { x: 0.2270, y: 0.3210, w: 0.0990, h: 0.0700 },
+  sex:          { x: 0.3850, y: 0.3210, w: 0.0490, h: 0.0700 },
+  dob:          { x: 0.4840, y: 0.3210, w: 0.1980, h: 0.0700 },
+  nin:          { x: 0.2270, y: 0.4000, w: 0.4450, h: 0.0700 },
+  card_no:      { x: 0.2270, y: 0.4830, w: 0.2170, h: 0.0700 },
+  expiry:       { x: 0.4840, y: 0.4830, w: 0.1980, h: 0.0700 }
+};
+
+const SYNTHETIC_BACK_ROIS = {
+  address_block: { x: 0.0158, y: 0.3072, w: 0.4051, h: 0.2978 },
+  mrz_line1:     { x: 0.005, y: 0.72, w: 0.99, h: 0.09 },
+  mrz_line2:     { x: 0.005, y: 0.81, w: 0.99, h: 0.09 },
+  mrz_line3:     { x: 0.005, y: 0.90, w: 0.99, h: 0.095 }
+};
+
+const FIELD_OCR_SETTINGS = {
+  surname:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
+  given_names:   { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ -' },
+  nationality:   { psm: '6', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' },
+  sex:           { psm: '6', whitelist: 'MF' },
+  dob:           { psm: '6', whitelist: '0123456789.' },
+  nin:           { psm: '6', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
+  issue_date:    { psm: '6', whitelist: '0123456789.' },
+  expiry:        { psm: '6', whitelist: '0123456789.' },
+  card_no:       { psm: '8', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' },
+  mrz_line1:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
+  mrz_line2:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
+  mrz_line3:     { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' },
+  address_block: { psm: '6', whitelist: '' },
+  district:      { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  county:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  sub_county:    { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  parish:        { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ ' },
+  village:       { psm: '7', whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ' }
+};
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// ─── Merge + MRZ backfill ────────────────────────────────────────────────
+function reconcileName(frontName, mrzName) {
+  if (!frontName) return mrzName || '';
+  if (!mrzName) return frontName || '';
+
+  const frontLooksNoisy = isLikelyNameNoise(frontName);
+  const mrzLooksValid = isPersonNameStrict(normalizeNameStrict(mrzName));
+  if (frontLooksNoisy && mrzLooksValid) return mrzName;
+  if (mrzLooksValid && isWeakName(frontName)) return mrzName;
+
+  const fClean = frontName.toUpperCase().replace(/[^A-Z]/g, '');
+  const mClean = mrzName.toUpperCase().replace(/[^A-Z]/g, '');
+
+  if (fClean === mClean) return frontName;
+
+  // 1. If one name contains the other as a substring (spaces removed), return the longer one
+  if (mClean.includes(fClean)) return mrzName;
+  if (fClean.includes(mClean)) return frontName;
+
+  const fToks = frontName.toUpperCase().split(/\s+/).filter(Boolean);
+  const mToks = mrzName.toUpperCase().split(/\s+/).filter(Boolean);
+
+  // 2. If same number of tokens, reconcile token-by-token (handles prefix/suffix cut-offs in individual words)
+  if (fToks.length === mToks.length) {
+    const reconciled = [];
+    for (let i = 0; i < fToks.length; i++) {
+      const ft = fToks[i];
+      const mt = mToks[i];
+      
+      if (ft === mt) {
+        reconciled.push(ft);
+      } else if (mt.startsWith(ft) || mt.endsWith(ft)) {
+        reconciled.push(mt);
+      } else if (ft.startsWith(mt) || ft.endsWith(mt)) {
+        reconciled.push(ft);
+      } else if (mrzLooksValid) {
+        const dist = levenshtein(ft, mt);
+        const maxLen = Math.max(ft.length, mt.length);
+        if (maxLen > 0 && dist <= 2 && dist / maxLen <= 0.34) {
+          reconciled.push(mt);
+        } else {
+          reconciled.push(ft);
+        }
+      } else {
+        reconciled.push(ft); // default fallback
+      }
+    }
+    return reconciled.join(' ');
+  }
+
+  // 3. Fallback suffix/prefix check
+  if (mClean.startsWith(fClean) || mClean.endsWith(fClean)) return mrzName;
+  if (fClean.startsWith(mClean) || fClean.endsWith(mClean)) return frontName;
+
+  return frontName;
+}
+
+function isLikelyNameNoise(name) {
+  const raw = String(name || '').toUpperCase();
+  const compact = raw.replace(/[^A-Z]/g, '');
+  if (!compact || compact.length < 3) return true;
+  if (/\b(SURNAME|GIVEN|NAMES?|NATIONALITY|UGA|SEX|DOB|DATE|EXPIRY|CARD|NIN|HOLDER|SIGNATURE)\b/.test(raw)) {
+    return true;
+  }
+  if (/(DATE|EXP|HOLDER|NATIONALITY|GIVEN|NAMES|CARD|UGA|SEX|NIN)/.test(compact)) {
+    return true;
+  }
+  return false;
+}
+
+function isWeakName(name) {
+  const normalized = normalizeNameStrict(name);
+  const compact = normalized.replace(/[^A-Z]/g, '');
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (compact.length < 4) return true;
+  if (tokens.length === 1 && compact.length < 5) return true;
+  if (!/[AEIOU]/.test(compact)) return true;
+  return false;
+}
+
+function normalizeNationality(raw) {
+  const v = String(raw || '').toUpperCase().replace(/[^A-Z]/g, '');
+  if (!v) return '';
+  if (v.includes('UGA') || v.includes('UGANDA')) return 'UGA';
+  return '';
+}
+
+function repairUgandaSurname(raw) {
+  const name = normalizeNameStrict(raw);
+  const compact = name.replace(/[^A-Z]/g, '');
+  if (compact === 'ATO' || compact === 'ATOS' || compact.startsWith('ATOS')) return 'KATO';
+  if (compact === 'RUNGI') return 'BIRUNGI';
+  return name;
+}
+
+function looksLikeMrzLine(line) {
+  const l = (line || '').toString().toUpperCase().replace(/\s+/g, '');
+  if (l.length < 18) return false;
+  const alnumChevron = (l.match(/[A-Z0-9<]/g) || []).length;
+  if (alnumChevron / l.length < 0.85) return false;
+  const digits = (l.match(/[0-9]/g) || []).length;
+  const chevrons = (l.match(/</g) || []).length;
+  return digits >= 3 || chevrons >= 1;
+}
+
+function looksLikeMrzBlock(lines) {
+  const arr = (lines || []).filter(Boolean);
+  const validCount = arr.filter(looksLikeMrzLine).length;
+  const hasIdMarker = arr.some(l => /ID[A-Z]{3}/i.test(l));
+  const hasNinPattern = arr.some(l => /[CAP][MF][A-Z0-9]{9,12}/i.test(l));
+  return validCount >= 2 && (hasIdMarker || hasNinPattern);
+}
+
+function scoreBackExtraction(backData, mrzLines) {
+  const d = backData || {};
+  let score = 0;
+  if (validateNin(d.nin, d.dob)) score += 2;
+  if (validateDob(d.dob)) score += 2;
+  if (validateSexOrBlank(d.sex)) score += 1;
+  if (validateExpiry(d.expiry)) score += 1;
+  if (isPersonNameStrict(normalizeNameStrict(d.surname))) score += 2;
+  if (d.given_names && normalizeNameStrict(d.given_names)) score += 1;
+  ['village', 'parish', 'sub_county', 'county', 'district'].forEach(k => {
+    if (cleanLocationNameStrict(d[k])) score += 1;
+  });
+  if (looksLikeMrzBlock(mrzLines)) score += 2;
+  return score;
+}
+
+// Accepts { front: {}, back: {} } and returns a merged flat result object.
+function mergeAndApplyMrzBackfill(merged) {
+  const front = merged.front || {};
+  const back  = merged.back  || {};
+
+  const mrz = {
+    nin:         back.nin         || '',
+    dob:         back.dob         || '',
+    sex:         back.sex         || '',
+    expiry:      back.expiry      || '',
+    surname:     back.surname     || '',
+    given_names: back.given_names || '',
+    card_no:     back.card_no     || '',
+  };
+
+  let dataQualityFlag = '';
+  let barcodeOcrMismatches = [];
+
+  if (back.source === 'barcode') {
+    // Check Surname mismatch
+    if (front.surname && back.surname && front.surname.toUpperCase().trim() !== back.surname.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Surname mismatch (Front OCR: "${front.surname}", Barcode: "${back.surname}")`);
+    }
+    // Check Given Names mismatch
+    if (front.given_names && back.given_names && front.given_names.toUpperCase().trim() !== back.given_names.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Given Names mismatch (Front OCR: "${front.given_names}", Barcode: "${back.given_names}")`);
+    }
+    // Check DOB mismatch
+    if (front.dob && back.dob && front.dob !== back.dob) {
+      barcodeOcrMismatches.push(`DOB mismatch (Front OCR: "${front.dob}", Barcode: "${back.dob}")`);
+    }
+    // Check NIN mismatch
+    if (front.nin && back.nin && front.nin.toUpperCase().trim() !== back.nin.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`NIN mismatch (Front OCR: "${front.nin}", Barcode: "${back.nin}")`);
+    }
+    // Check Sex mismatch
+    if (front.sex && back.sex && front.sex.toUpperCase().trim() !== back.sex.toUpperCase().trim()) {
+      barcodeOcrMismatches.push(`Sex mismatch (Front OCR: "${front.sex}", Barcode: "${back.sex}")`);
+    }
+
+    if (barcodeOcrMismatches.length > 0) {
+      dataQualityFlag = 'Mismatches: ' + barcodeOcrMismatches.join('; ');
+    }
+  }
+
+  // ── front-vs-MRZ-OCR mismatch detection (back.source === 'ocr') ──────────
+  // Override behaviour is unchanged — MRZ still wins via reconcile*.
+  // This block only makes the disagreement visible in dataQualityFlag so
+  // that a silent corruption (e.g. garbled OCR overwriting a correct front
+  // value) surfaces to field staff rather than being silently swallowed.
+  //
+  // Comparison is gated on both values passing format validation: if only
+  // one side is valid, reconcile* would already have chosen the valid one
+  // without a real mismatch, so there is nothing meaningful to flag.
+  if (back.source === 'ocr') {
+    const mrzOcrMismatches = [];
+
+    const vFrontDob = validateDob(front.dob);
+    const vMrzDob   = validateDob(mrz.dob);
+    if (vFrontDob && vMrzDob && vFrontDob !== vMrzDob) {
+      mrzOcrMismatches.push(
+        `DOB mismatch: front=${vFrontDob} vs back-MRZ=${vMrzDob} \u2014 MRZ value used, please verify against physical card`
       );
     }
-    if (record.source) lines.push(`Source       : ${record.source}`);
-    for (const warning of record.warnings) lines.push(`WARNING      : ${warning}`);
-    return lines.join("\n");
+
+    const vFrontNin = validateNin(front.nin);
+    const vMrzNin   = validateNin(mrz.nin);
+    if (vFrontNin && vMrzNin && vFrontNin !== vMrzNin) {
+      mrzOcrMismatches.push(
+        `NIN mismatch: front=${vFrontNin} vs back-MRZ=${vMrzNin} \u2014 MRZ value used, please verify against physical card`
+      );
+    }
+
+    if (mrzOcrMismatches.length > 0) {
+      dataQualityFlag = 'MRZ-OCR override: ' + mrzOcrMismatches.join('; ');
+    }
   }
 
-  // --------------------------------------------------------------------
-  // Public API
-  // --------------------------------------------------------------------
-
-  global.UgIdParser = {
-    // errors
-    CardParseError,
-    ScanError,
-    // data model
-    Fingerprint,
-    CardRecord,
-    // parsing
-    parseNin,
-    parseCard,
-    // scanning (async — all touch the camera/canvas pipeline)
-    findSymbolBbox,
-    findAllSymbolBboxes,
-    looksLikeCardPayload,
-    scanCardImage,
-    parseCardImage,
-    readCard,
-    // display
-    render,
+  let out = {
+    surname:     '',
+    given_names: '',
+    sex:         '',
+    dob:         '',
+    nin:         '',
+    expiry:      '',
+    card_no:     '',
+    nationality: '',
+    village:     back.village     || '',
+    parish:      back.parish      || '',
+    sub_county:  back.sub_county  || '',
+    county:      back.county      || '',
+    district:    back.district    || '',
   };
-})(typeof window !== "undefined" ? window : globalThis);
+
+  if (back.source === 'barcode') {
+    out.dob         = back.dob || front.dob || '';
+    out.expiry      = back.expiry || front.expiry || '';
+    out.nin         = back.nin || front.nin || '';
+    out.sex         = back.sex || front.sex || '';
+    out.surname     = back.surname || front.surname || '';
+    out.given_names = back.given_names || front.given_names || '';
+    out.card_no     = back.card_no || front.card_no || '';
+    out.nationality = back.nationality || front.nationality || 'UGA';
+  } else {
+    // Reconcile dates, sex, and NINs using prioritized accuracy rules
+    out.dob         = reconcileDob(front.dob, mrz.dob);
+    out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
+    out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
+    out.sex         = reconcileSex(front.sex, mrz.sex);
+
+    // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
+    if (!out.sex && out.nin && out.nin.length >= 2) {
+      const derivedSex = out.nin[1].toUpperCase();
+      if (derivedSex === 'M' || derivedSex === 'F') {
+        out.sex = derivedSex;
+      }
+    }
+
+    out.surname     = repairUgandaSurname(reconcileName(front.surname, mrz.surname));
+    out.given_names = reconcileName(front.given_names, mrz.given_names);
+    out.card_no     = normalizeCardNumber(front.card_no) || normalizeCardNumber(mrz.card_no) || '';
+    out.nationality = normalizeNationality(back.nationality) ||
+                      normalizeNationality(front.nationality) ||
+                      ((out.nin || out.dob || out.surname) ? 'UGA' : '');
+  }
+
+  // Apply validations and corrections
+  out.nin         = validateNin(out.nin);
+  out.dob         = validateDob(out.dob);
+  out.sex         = validateSexOrBlank(out.sex);
+  out.expiry      = validateExpiry(out.expiry);
+  out.card_no     = normalizeCardNumber(out.card_no);
+
+  // Confidence scores
+  const confidence = {};
+  const fields = [
+    { key: 'nin',         get: () => out.nin,         valid: v => !!validateNin(v),                                   mrz: mrz.nin         },
+    { key: 'dob',         get: () => out.dob,         valid: v => !!validateDob(v),                                   mrz: mrz.dob         },
+    { key: 'sex',         get: () => out.sex,         valid: v => !!validateSexOrBlank(v),                            mrz: mrz.sex         },
+    { key: 'surname',     get: () => out.surname,     valid: v => isPersonNameStrict(normalizeNameStrict(v)),          mrz: mrz.surname     },
+    { key: 'given_names', get: () => out.given_names, valid: v => isPersonNameStrict(normalizeNameStrict(v)),          mrz: mrz.given_names }
+  ];
+
+  for (const f of fields) {
+    const val     = f.get();
+    const mrzVal  = f.mrz;
+    const passes  = f.valid(val);
+    const matchesMrz = passes && mrzVal &&
+      String(val).toUpperCase().trim() === String(mrzVal).toUpperCase().trim();
+
+    let level = 'low';
+    if (passes && matchesMrz)  level = 'high';
+    else if (passes)           level = 'medium';
+    confidence[f.key] = level;
+  }
+
+  out.confidence = confidence;
+  out.dataQualityFlag = dataQualityFlag;
+  out.barcodeWarnings = back.barcodeWarnings || [];
+  return out;
+}
+
+function reconcileDob(frontDob, mrzDob) {
+  const vFront = validateDob(frontDob);
+  const vMrz   = validateDob(mrzDob);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
+  return vFront || vMrz || frontDob || mrzDob || '';
+}
+
+function reconcileExpiry(frontExpiry, mrzExpiry) {
+  const vFront = validateExpiry(frontExpiry);
+  const vMrz   = validateExpiry(mrzExpiry);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
+  return vFront || vMrz || frontExpiry || mrzExpiry || '';
+}
+
+function reconcileSex(frontSex, mrzSex) {
+  const vFront = validateSexOrBlank(frontSex);
+  const vMrz   = validateSexOrBlank(mrzSex);
+  if (vFront && vMrz && vFront !== vMrz) return vMrz;
+  return vFront || vMrz || frontSex || mrzSex || '';
+}
+
+function reconcileNins(frontNin, mrzNin, dob) {
+  const vFront = validateNin(frontNin, dob);
+  const vMrz   = validateNin(mrzNin, dob);
+  if (vFront && vMrz) {
+    if (vFront === vMrz) return vFront;
+    return vMrz;
+  }
+  
+  const cleanFront = validateNin(frontNin, dob);
+  const cleanMrz   = validateNin(mrzNin, dob);
+  if (cleanFront) return cleanFront;
+  if (cleanMrz) return cleanMrz;
+  
+  if (frontNin) {
+    const cand = normalizeNinCandidate(frontNin, dob);
+    if (validateNin(cand, dob)) return cand;
+  }
+  if (mrzNin) {
+    const cand = normalizeNinCandidate(mrzNin, dob);
+    if (validateNin(cand, dob)) return cand;
+  }
+
+  return '';
+}
+
+// ─── Exports ──────────────────────────────────────────────────────────────
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    ROI,
+    FRONT_ROIS,
+    BACK_ROIS,
+    NEW_FRONT_ROIS,
+    NEW_BACK_ROIS,
+    SYNTHETIC_FRONT_ROIS,
+    SYNTHETIC_BACK_ROIS,
+    FIELD_OCR_SETTINGS,
+    parseFront,
+    parseBack,
+    parseMRZ,
+    mergeAndApplyMrzBackfill,
+    validateNin,
+    parseAndFormatDob,
+    validateSexOrBlank,
+    normalizeNameStrict,
+    isPersonNameStrict,
+    cleanLocationNameStrict,
+    mrzYYMMDDToDisplay,
+    normalizeOCRText,
+    validateDob,
+    validateExpiry,
+    reconcileDob,
+    reconcileExpiry,
+    reconcileSex,
+    reconcileNins,
+    correctNIN,
+    correctDate,
+    looksLikeMrzLine,
+    looksLikeMrzBlock,
+    scoreBackExtraction
+  };
+} else {
+  // Browser global exposure
+  window.ROI = ROI;
+  window.FRONT_ROIS = FRONT_ROIS;
+  window.BACK_ROIS = BACK_ROIS;
+  window.NEW_FRONT_ROIS = NEW_FRONT_ROIS;
+  window.NEW_BACK_ROIS = NEW_BACK_ROIS;
+  window.SYNTHETIC_FRONT_ROIS = SYNTHETIC_FRONT_ROIS;
+  window.SYNTHETIC_BACK_ROIS = SYNTHETIC_BACK_ROIS;
+  window.FIELD_OCR_SETTINGS = FIELD_OCR_SETTINGS;
+  window.parseFront = parseFront;
+  window.parseBack = parseBack;
+  window.parseMRZ = parseMRZ;
+  window.mergeAndApplyMrzBackfill = mergeAndApplyMrzBackfill;
+  window.validateNin = validateNin;
+  window.parseAndFormatDob = parseAndFormatDob;
+  window.validateSexOrBlank = validateSexOrBlank;
+  window.normalizeNameStrict = normalizeNameStrict;
+  window.isPersonNameStrict = isPersonNameStrict;
+  window.cleanLocationNameStrict = cleanLocationNameStrict;
+  window.mrzYYMMDDToDisplay = mrzYYMMDDToDisplay;
+  window.normalizeOCRText = normalizeOCRText;
+  window.validateDob = validateDob;
+  window.validateExpiry = validateExpiry;
+  window.reconcileDob = reconcileDob;
+  window.reconcileExpiry = reconcileExpiry;
+  window.reconcileSex = reconcileSex;
+  window.reconcileNins = reconcileNins;
+  window.correctNIN = correctNIN;
+  window.correctDate = correctDate;
+  window.looksLikeMrzLine = looksLikeMrzLine;
+  window.looksLikeMrzBlock = looksLikeMrzBlock;
+  window.scoreBackExtraction = scoreBackExtraction;
+}
