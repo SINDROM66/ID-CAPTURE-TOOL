@@ -372,29 +372,52 @@ function parseFront(raw) {
     if (d) dates.push(d);
   }
 
-  const dobMatch = up.match(/\b(?:DOB|BIRTH)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
-  if (dobMatch) data.dob = parseAndFormatDob(dobMatch[1]);
-
-  const expiryMatch = up.match(/\b(?:EXPIRY|EXP)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
-  if (expiryMatch) data.expiry = parseAndFormatDob(expiryMatch[1]);
-
-  const issueMatch = up.match(/\b(?:ISSUE)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
-  const issueDate = issueMatch ? parseAndFormatDob(issueMatch[1]) : null;
-
-  // Fallback positional dates if labels failed
-  if (!data.dob && dates.length > 0) {
-    if (issueDate && dates[0] === issueDate) {
-      // dates[0] is Issue Date. DOB was likely missed by OCR entirely.
-    } else {
-      data.dob = dates[0];
+  // --- Robust Chronological Date Sorting ---
+  // The new ID cards often cause Tesseract to read the dates out of layout order.
+  // We extract all valid dates, sort them chronologically, and map them logically:
+  // Oldest = DOB, Middle = Issue Date, Newest = Expiry Date
+  let validDates = [];
+  const dateMatchesGlob = up.matchAll(/\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/g);
+  for (const m of dateMatchesGlob) {
+    const d = parseAndFormatDob(m[1]);
+    if (d) {
+      const parts = d.split('.');
+      const ts = new Date(parseInt(parts[2], 10), parseInt(parts[1], 10) - 1, parseInt(parts[0], 10)).getTime();
+      validDates.push({ dateStr: d, ts });
     }
   }
 
-  if (!data.expiry && dates.length >= 2) {
-    const lastDate = dates[dates.length - 1];
-    if (lastDate !== issueDate) {
-      data.expiry = lastDate;
+  // Remove duplicates
+  validDates = validDates.filter((v, i, a) => a.findIndex(t => (t.dateStr === v.dateStr)) === i);
+  // Sort oldest to newest
+  validDates.sort((a, b) => a.ts - b.ts);
+
+  if (validDates.length === 3) {
+    data.dob = validDates[0].dateStr;
+    // index 1 is issue date (ignored for now as we don't store it)
+    data.expiry = validDates[2].dateStr;
+  } else if (validDates.length === 2) {
+    // If we only found 2 dates, it's tricky. Let's rely on labels as a fallback, or assume DOB and Expiry.
+    // If one year is > current year, it must be expiry.
+    const curY = new Date().getFullYear();
+    const y0 = parseInt(validDates[0].dateStr.split('.')[2], 10);
+    const y1 = parseInt(validDates[1].dateStr.split('.')[2], 10);
+    
+    if (y1 > curY) {
+      data.expiry = validDates[1].dateStr;
+      data.dob = validDates[0].dateStr;
+    } else {
+      // Fallback to label matching if chronological is ambiguous
+      const dobMatch = up.match(/\b(?:DOB|BIRTH)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+      if (dobMatch) data.dob = parseAndFormatDob(dobMatch[1]);
+      const expiryMatch = up.match(/\b(?:EXPIRY|EXP)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+      if (expiryMatch) data.expiry = parseAndFormatDob(expiryMatch[1]);
     }
+  } else {
+    const dobMatch = up.match(/\b(?:DOB|BIRTH)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+    if (dobMatch) data.dob = parseAndFormatDob(dobMatch[1]);
+    const expiryMatch = up.match(/\b(?:EXPIRY|EXP)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+    if (expiryMatch) data.expiry = parseAndFormatDob(expiryMatch[1]);
   }
 
   // NIN (uses DOB for prefix Year of Birth reconciliation if available)
