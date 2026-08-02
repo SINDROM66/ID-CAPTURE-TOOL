@@ -411,19 +411,20 @@ body {
   margin-bottom: 8px;
 }
 
-.progress-track {
-  background: #e2e8f0;
-  border-radius: 20px;
-  height: 10px;
-  overflow: hidden;
+/* --- Spinner Animation --- */
+.spinner {
+  border: 4px solid #e2e8f0;
+  border-top: 4px solid var(--primary);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  animation: spin 1s linear infinite;
+  margin: 10px auto;
 }
 
-.progress-fill {
-  background: linear-gradient(90deg, var(--primary), #3b9ae0);
-  height: 10px;
-  border-radius: 20px;
-  width: 0%;
-  transition: width 0.4s ease;
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .progress-sub {

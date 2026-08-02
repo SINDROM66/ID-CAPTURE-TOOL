@@ -1092,7 +1092,7 @@ function alert(type, html) {
 
 // ─── Progress helpers ─────────────────────────
 function setProgress(pct, label, sub) {
-  document.getElementById('prog-fill').style.width = pct + '%';
+  // pct is no longer used since we switched to a spinner
   document.getElementById('prog-label').textContent = label;
   document.getElementById('prog-sub').textContent = sub;
 }
