@@ -364,15 +364,38 @@ function parseFront(raw) {
   const up = normalizeOCRText(raw);
   const lines = up.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
-  // Dates: DOB = first, Expiry = second
+  // Dates: Try labels first to avoid positional shifts
   const dates = [];
   const dateMatches = up.matchAll(/\b\d{2}[.\/\-]\d{2}[.\/\-]\d{4}\b/g);
   for (const m of dateMatches) {
     const d = parseAndFormatDob(m[0]);
     if (d) dates.push(d);
   }
-  if (dates[0]) data.dob = dates[0];
-  if (dates[1]) data.expiry = dates[1];
+
+  const dobMatch = up.match(/\b(?:DOB|BIRTH)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  if (dobMatch) data.dob = parseAndFormatDob(dobMatch[1]);
+
+  const expiryMatch = up.match(/\b(?:EXPIRY|EXP)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  if (expiryMatch) data.expiry = parseAndFormatDob(expiryMatch[1]);
+
+  const issueMatch = up.match(/\b(?:ISSUE)[\s\S]{0,40}?\b(\d{2}[.\/\-]\d{2}[.\/\-]\d{4})\b/i);
+  const issueDate = issueMatch ? parseAndFormatDob(issueMatch[1]) : null;
+
+  // Fallback positional dates if labels failed
+  if (!data.dob && dates.length > 0) {
+    if (issueDate && dates[0] === issueDate) {
+      // dates[0] is Issue Date. DOB was likely missed by OCR entirely.
+    } else {
+      data.dob = dates[0];
+    }
+  }
+
+  if (!data.expiry && dates.length >= 2) {
+    const lastDate = dates[dates.length - 1];
+    if (lastDate !== issueDate) {
+      data.expiry = lastDate;
+    }
+  }
 
   // NIN (uses DOB for prefix Year of Birth reconciliation if available)
   const words = up.split(/[\s|]+/).filter(Boolean);
@@ -399,9 +422,9 @@ function parseFront(raw) {
   if (nin) data.nin = nin;
 
   // Sex
-  const sexMatch = up.match(/\bSEX\s+[\s\S]{0,60}\b([MF])\b/);
+  const sexMatch = up.match(/\bSEX\b[\s\S]{0,35}?(?<!\bO\s*)\b([MF])\b/i);
   const sex = sexMatch
-    ? validateSexOrBlank(sexMatch[1])
+    ? validateSexOrBlank(sexMatch[1].toUpperCase())
     : validateSexOrBlank(lines.find(l => /^[MF]$/.test(l.trim().toUpperCase())));
   if (sex) data.sex = sex;
 
@@ -423,11 +446,11 @@ function parseFront(raw) {
   }
 
   if (givenPos >= 0) {
-    let slice = up.slice(givenPos, givenPos + 100);
-    const boundaryMatch = slice.match(/\b(NATIONALITY|SEX|DATE|BIRTH|NIN|BATE|GARD|CARD)\b/);
-    if (boundaryMatch) slice = slice.slice(0, boundaryMatch.index);
-    const candidate = slice.replace(/\b(GIVEN|GIVER|GIVEM)\b/, ' ');
-    const nm = normalizeNameStrict(candidate);
+    // slice text from GIVEN to next label (or up to 100 chars)
+    const chunk = up.slice(givenPos, givenPos + 100);
+    // clean out known labels
+    const cleanedChunk = chunk.replace(/\b(GIVEN|NAMES?|NATIONALITY|UGA|SEX|DOB|DATE|EXPIRY|CARD|NIN|HOLDER|OTHER)\b/g, '');
+    const nm = normalizeNameStrict(cleanedChunk);
     const toks = nm.split(/\s+/).filter(Boolean);
     // FIX 3: extended stop-word list includes synthetic-card watermark noise tokens
     const FNAME_STOP = new Set(['NATIONAL','ID','CARD','REPUBLIC','UGANDA','GIVEN','NAME','GIVER',
