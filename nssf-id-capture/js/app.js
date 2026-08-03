@@ -1419,9 +1419,18 @@ async function proceedWithWarpedImages(frontCanvas, backCanvas) {
     const result = await worker.recognize(preprocessed.toDataURL('image/png'));
     await worker.terminate();
 
+    // Inserted logging right before parseBack
     const fullBackText = (result.data.text || '').trim();
-    backData = parseBack(fullBackText);
+    console.log("=== DEBUG: PRE-PARSE ===");
+    console.log("rawBackText:", fullBackText);
+    console.log("window.parseBack typeof:", typeof window.parseBack);
+    console.log("window.parseBack reference:", window.parseBack.toString().slice(0, 100));
+    
+    backData = window.parseBack(fullBackText);
     backData.source = 'ocr';
+    
+    console.log("=== DEBUG: POST-PARSE ===");
+    console.log("backData returned:", JSON.stringify(backData));
 
     rawBack = `LAYOUT: ${backLayout}\n=== FULL BACK OCR RAW ===\n${fullBackText}`;
   }
@@ -2096,3 +2105,4 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+

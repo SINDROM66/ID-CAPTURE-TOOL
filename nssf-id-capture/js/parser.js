@@ -1093,10 +1093,14 @@ function scoreBackExtraction(backData, mrzLines) {
 
 // Accepts { front: {}, back: {} } and returns a merged flat result object.
 function mergeAndApplyMrzBackfill(merged) {
-  const front = merged.front || {};
-  const back  = merged.back  || {};
+    const front = merged.front || {};
+    const back  = merged.back  || {};
+  
+    console.log("=== DEBUG: mergeAndApplyMrzBackfill START ===");
+    console.log("front DOB:", front.dob, "front Sex:", front.sex);
+    console.log("back (MRZ) DOB:", back.dob, "back (MRZ) Sex:", back.sex);
 
-  const mrz = {
+    const mrz = {
     nin:         back.nin         || '',
     dob:         back.dob         || '',
     sex:         back.sex         || '',
@@ -1196,10 +1200,10 @@ function mergeAndApplyMrzBackfill(merged) {
     out.nationality = back.nationality || front.nationality || 'UGA';
   } else {
     // Reconcile dates, sex, and NINs using prioritized accuracy rules
-    out.dob         = reconcileDob(front.dob, mrz.dob);
+    out.dob = reconcileDob(front.dob, mrz.dob); console.log("reconcileDob returned:", out.dob);
     out.expiry      = reconcileExpiry(front.expiry, mrz.expiry);
     out.nin         = reconcileNins(front.nin, mrz.nin, out.dob); // pass reconciled DOB for Year of Birth correction
-    out.sex         = reconcileSex(front.sex, mrz.sex);
+    out.sex = reconcileSex(front.sex, mrz.sex); console.log("reconcileSex returned:", out.sex);
 
     // If sex is still empty, derive it from the verified NIN (index 1 is M or F)
     if (!out.sex && out.nin && out.nin.length >= 2) {
@@ -1368,3 +1372,4 @@ if (typeof module !== 'undefined' && module.exports) {
   window.looksLikeMrzBlock = looksLikeMrzBlock;
   window.scoreBackExtraction = scoreBackExtraction;
 }
+
