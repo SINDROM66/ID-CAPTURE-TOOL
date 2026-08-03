@@ -79,8 +79,15 @@ function tryNormalizeNewFormat(chars) {
 }
 
 function normalizeNinCandidate(candidate, dob) {
-  let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const embeddedNin = v.match(/[CAP1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
+    let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    
+    // Fuzzy repair for OCR hallucinating an extra 'O' or '0' at pos 2
+    // e.g. CMO000351093UXF (15 chars) -> CM000351093UXF
+    if (v.length === 15 && /^[CAP][MF][O0I1L][A-Z0-9]{12}$/i.test(v)) {
+      v = v.substring(0, 2) + v.substring(3);
+    }
+
+    const embeddedNin = v.match(/[CAP1G0OI4L][MFN13PR0-9BH][A-Z0-9]{12}/i);
   if (embeddedNin && embeddedNin[0] !== v) {
     return normalizeNinCandidate(embeddedNin[0], dob);
   }

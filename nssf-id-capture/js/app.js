@@ -937,6 +937,55 @@ function cropROI(canvas, roi, fieldName) {
 
 // ─── Tab switching ────────────────────────────
 function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '', layout = 'old') {
+  const isMrz = fieldName && fieldName.startsWith('mrz_line');
+  const isNewID = layout === 'new';
+  const useBwScan = state.scanMode &&
+    (isMrz || ['nin', 'dob', 'expiry', 'issue_date', 'card_no', 'sex', 'district', 'county', 'sub_county', 'parish', 'village'].includes(fieldName));
+
+  // If OpenCV is loaded, use advanced adaptive ML thresholding for robust lighting handling
+  if (typeof cv !== 'undefined' && cv.Mat && isOpenCvLoaded) {
+    try {
+      const srcW = croppedCanvas.width;
+      const srcH = croppedCanvas.height;
+      const dstW = Math.max(1, Math.round(srcW * scaleFactor));
+      const dstH = Math.max(1, Math.round(srcH * scaleFactor));
+      
+      const src = cv.imread(croppedCanvas);
+      const dst = new cv.Mat();
+      
+      // 1. High-quality resize
+      cv.resize(src, dst, new cv.Size(dstW, dstH), 0, 0, cv.INTER_CUBIC);
+      
+      // 2. Grayscale conversion
+      cv.cvtColor(dst, dst, cv.COLOR_RGBA2GRAY);
+      
+      // 3. Adaptive Thresholding to eliminate shadows, glare, and varying lighting
+      if (isMrz || useBwScan || (isNewID && fieldName === 'full_front')) {
+        let blockSize = isMrz ? 31 : 21;
+        let cValue = isMrz ? 15 : 12;
+        cv.adaptiveThreshold(dst, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, blockSize, cValue);
+      } else {
+         // For fields where we want to keep grayscale, just normalize the lighting
+         let clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+         clahe.apply(dst, dst);
+         clahe.delete();
+      }
+      
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = dstW;
+      outCanvas.height = dstH;
+      cv.imshow(outCanvas, dst);
+      
+      src.delete();
+      dst.delete();
+      
+      return outCanvas;
+    } catch (err) {
+      console.warn("OpenCV preprocess failed, falling back to manual canvas method", err);
+    }
+  }
+
+  // --- Fallback Manual Canvas Method ---
   const srcW = croppedCanvas.width;
   const srcH = croppedCanvas.height;
   const dstW = Math.max(1, Math.round(srcW * scaleFactor));
