@@ -1,3 +1,4 @@
+(function() {
 /* ═══════════════════════════════════════════════════════════════════════
    parser.js — Pure OCR parsing logic for Uganda National ID cards.
    Extracted from app.js for use in Node.js test harness.
@@ -836,3 +837,5 @@ if (typeof module !== 'undefined' && module.exports) {
   window.scoreBackExtraction = scoreBackExtraction;
 }
 
+
+})();
