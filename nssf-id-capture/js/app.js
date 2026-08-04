@@ -1024,9 +1024,6 @@ function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '', layout 
   }
 
   const mean = sum / Math.max(1, lum.length);
-  const isMrz = fieldName && fieldName.startsWith('mrz_line');
-  const useBwScan = state.scanMode &&
-    (isMrz || ['nin', 'dob', 'expiry', 'issue_date', 'card_no', 'sex', 'district', 'county', 'sub_county', 'parish', 'village'].includes(fieldName));
   const threshold = isMrz ? Math.min(188, mean * 0.92) : Math.min(190, mean * 0.90);
 
   for (let y = 0; y < dstH; y++) {
