@@ -79,7 +79,7 @@ function tryNormalizeNewFormat(chars) {
 }
 
 function normalizeNinCandidate(candidate, dob) {
-    let v = (candidate || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    let v = (candidate || '').toUpperCase().replace(/€/g, 'C').replace(/[^A-Z0-9]/g, '');
     
     // Fuzzy repair for OCR hallucinating an extra 'O' or '0' at pos 2
     // e.g. CMO000351093UXF (15 chars) -> CM000351093UXF
@@ -715,7 +715,7 @@ function parseMRZ(mrzLines) {
     let line2Clean = line2.replace(/\s+/g, '');
     let dobRaw = '';
     let sexRaw = '';
-    const dobSexMatch = line2Clean.match(/([0-9OISBZD]{6})[0-9OISBZD]([MF])/i);
+    const dobSexMatch = line2Clean.match(/([0-9OISBZD]{6})[0-9OISBZD]([MF<])([0-9OISBZD]{6})/i);
     if (dobSexMatch) {
         let rawDate = dobSexMatch[1].toUpperCase();
         const map = {'O':'0', 'I':'1', 'S':'5', 'B':'8', 'Z':'2', 'D':'0'};
@@ -790,11 +790,21 @@ function parseMRZ(mrzLines) {
         let fullYear = (year > currentYear2Digit) ? (1900 + year) : (2000 + year);
         dob = fullYear + '-' + month + '-' + day;
     }
+    
+    let finalSex = sexRaw === 'M' ? 'Male' : (sexRaw === 'F' ? 'Female' : sexRaw);
+    
+    if (nin && nin.length >= 2) {
+        const prefix = nin.substring(0, 2).toUpperCase();
+        const SEX_CODES = { 'CM': 'Male', 'CF': 'Female', 'AM': 'Male', 'AF': 'Female', 'PM': 'Male', 'PF': 'Female' };
+        if (SEX_CODES[prefix]) {
+            finalSex = SEX_CODES[prefix];
+        }
+    }
 
     return {
         surname: surname,
         givenName: givenName,
-        sex: sexRaw === 'M' ? 'Male' : (sexRaw === 'F' ? 'Female' : sexRaw),
+        sex: finalSex,
         dateOfBirth: dob,
         nationality: nationality,
         nin: nin
