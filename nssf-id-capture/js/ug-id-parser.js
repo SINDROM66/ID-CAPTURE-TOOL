@@ -707,7 +707,7 @@ function parseMRZ(mrzLines) {
     
     let line1Clean = line1.replace(/\s+/g, '');
     let nin = '';
-    const ninMatch = line1Clean.match(/[CAP][MF][A-Z0-9]{12}/i);
+    const ninMatch = line1Clean.match(/[CAP][MF][A-Z0-9]{12,13}/i);
     if (ninMatch) {
         nin = ninMatch[0].replace(/O/g, '0');
     }
