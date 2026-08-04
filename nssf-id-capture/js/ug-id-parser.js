@@ -723,8 +723,7 @@ function parseMRZ(mrzLines) {
     let line3Clean = line3.replace(/\s+/g, '<');
     line3Clean = line3Clean.replace(/[KLY]{4,}/g, (m) => '<'.repeat(m.length));
     line3Clean = line3Clean.replace(/<K<K/g, '<<').replace(/<K</g, '<<'); 
-    let match = line3Clean.match(/^(.*?)(?:<{3,}|$)/);
-    let namePart = match ? match[1] : line3Clean;
+    let namePart = line3Clean; // Removed premature <{3,} truncation which broke valid names
     let surname = '';
     let givenName = '';
 
@@ -752,6 +751,17 @@ function parseMRZ(mrzLines) {
             givenName = possibleClean;
         }
     }
+    
+    // ML/Structural Heuristic: Strip pure-consonant OCR noise at the end of the name
+    // e.g. "TIMOTHY K L K L K L K L" -> "TIMOTHY"
+    let givenWords = givenName.split(/\s+/).filter(Boolean);
+    let validGivenWords = [];
+    for (let w of givenWords) {
+        if (w.length === 1 && w !== 'A' && w !== 'I') continue; // drop isolated consonant noise
+        if (!/[AEIOU]/.test(w)) continue; // drop consonant-only garbage (e.g. KLKLKL)
+        validGivenWords.push(w);
+    }
+    givenName = validGivenWords.join(' ');
 
     let dob = '';
     if (dobRaw && dobRaw.length === 6 && !isNaN(parseInt(dobRaw))) {

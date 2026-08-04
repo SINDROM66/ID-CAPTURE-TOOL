@@ -5,6 +5,50 @@
 
 'use strict';
 
+// --- UI Debug Console Interceptor ---
+(function() {
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+
+  function appendToUIDebug(msg, isError) {
+    const debugBox = document.getElementById('ui-debug-console');
+    if (debugBox) {
+      const span = document.createElement('span');
+      span.style.color = isError ? '#ff4444' : '#00ff00';
+      span.innerText = msg + '\n';
+      debugBox.appendChild(span);
+      debugBox.scrollTop = debugBox.scrollHeight;
+    }
+  }
+
+  function stringifyArgs(args) {
+    return Array.from(args).map(arg => {
+      if (typeof arg === 'object') {
+        try {
+          return JSON.stringify(arg);
+        } catch (e) {
+          return '[Object]';
+        }
+      }
+      return arg;
+    }).join(' ');
+  }
+
+  console.log = function() {
+    originalLog.apply(console, arguments);
+    appendToUIDebug(stringifyArgs(arguments), false);
+  };
+  console.warn = function() {
+    originalWarn.apply(console, arguments);
+    appendToUIDebug('WARN: ' + stringifyArgs(arguments), true);
+  };
+  console.error = function() {
+    originalError.apply(console, arguments);
+    appendToUIDebug('ERROR: ' + stringifyArgs(arguments), true);
+  };
+})();
+
 // ─── State ────────────────────────────────────
 const state = {
   files: { front: null, back: null },
@@ -241,6 +285,7 @@ function detectCardBoundaryWithOpenCv(img) {
   const imgArea = detectSrc.cols * detectSrc.rows;
 
   cv.cvtColor(detectSrc, gray, cv.COLOR_RGBA2GRAY);
+  cv.equalizeHist(gray, gray); // Boost contrast to dramatically improve boundary detection
   cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
 
   for (const [low, high] of [[30, 95], [60, 170], [100, 240]]) {
@@ -604,7 +649,7 @@ function scoreCardDetection(points, img) {
 
 function chooseAutomaticCorners(img) {
   const candidates = [
-    { corners: detectCardBoundaryWithOpenCv(img), source: 'opencv', minimum: 0.58, priority: 0.08 },
+    { corners: detectCardBoundaryWithOpenCv(img), source: 'opencv', minimum: 0.40, priority: 0.08 },
     { corners: detectCardByCanvasScan(img), source: 'color-scan', minimum: 0.72, priority: 0 },
     { corners: detectCardByHorizontalBand(img), source: 'edge-band', minimum: 0.76, priority: -0.02 }
   ].filter(candidate => candidate.corners);
@@ -787,7 +832,9 @@ function getWarpedCanvasOrFallback(img, side) {
     }
 
     const result = chooseAutomaticCorners(img);
-    if (result.corners && result.score.confidence >= (result.minimum || 0.58)) {
+    // The chooseAutomaticCorners function already applies minimums and an ABSOLUTE_FLOOR fallback.
+    // We must trust its return value rather than re-enforcing the strict minimum here.
+    if (result && result.corners) {
       console.log(`Automatic ${side} card crop (${result.source}).`, result.score);
       try {
         const ordered = orderCorners(result.corners);
