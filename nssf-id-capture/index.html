@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NSSF Digital Pre-Registration — Member Data Capture Tool (v46)</title>
-  <link rel="stylesheet" href="css/style.css?v=46">
+  <title>NSSF Digital Pre-Registration — Member Data Capture Tool (v47)</title>
+  <link rel="stylesheet" href="css/style.css?v=47">
   <link rel="icon" href="assets/favicon.ico" type="image/x-icon">
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0d4f82">
@@ -42,7 +42,7 @@
       <div class="hdr-logo">NSSF</div>
       <div class="hdr-txt">
         <strong>Digital Pre-Registration</strong>
-        Member Data Capture Tool (v46)
+        Member Data Capture Tool (v47)
       </div>
       <div class="offline-badge">
         <span class="dot"></span> Offline
@@ -371,6 +371,19 @@
     </div>
   </div>
 
+  <!-- Live Camera Overlay -->
+  <div id="camera-overlay" class="live-camera-overlay">
+    <div id="camera-msg" class="live-camera-msg">Align ID Card in frame...</div>
+    <div class="live-camera-feed">
+      <video id="camera-video" autoplay playsinline></video>
+      <canvas id="camera-canvas"></canvas>
+    </div>
+    <div class="live-camera-ui">
+      <button id="btn-camera-cancel" class="btn btn-outline" style="background:#fff; color:#000;">Cancel</button>
+      <button id="btn-camera-manual" class="btn btn-primary">Manual Capture</button>
+    </div>
+  </div>
+
   <!-- SheetJS for Excel export -->
   <script src="js/xlsx.full.min.js"></script>
   <!-- Tesseract.js OCR engine -->
@@ -379,9 +392,11 @@
   <script src="js/parser.js"></script>
   <!-- ZXing library & Barcode parser -->
   <script src="js/vendor/zxing.umd.min.js"></script>
-  <script src="js/ug-id-parser.js?v=46"></script>
+  <script src="js/ug-id-parser.js?v=47"></script>
+  <!-- Camera Service -->
+  <script src="js/camera.js"></script>
   <!-- App logic -->
-  <script src="js/app.js?v=46"></script>
+  <script src="js/app.js?v=47"></script>
 
   <!-- Lock screen script -->
   <script>
@@ -454,6 +469,7 @@
   </script>
 </body>
 </html>
+
 
 
 

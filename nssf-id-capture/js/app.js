@@ -2167,12 +2167,17 @@ function showSourceSelector(side) {
   if (!modal || !sideName || !btnCamera || !btnGallery || !btnCancel) return;
 
   sideName.textContent = side === 'front' ? 'front' : 'back';
+  if (side === 'barcode') sideName.textContent = 'barcode';
   modal.style.display = 'flex';
 
   btnCamera.onclick = () => {
     modal.style.display = 'none';
-    const input = document.getElementById(`input-${side}-camera`);
-    if (input) input.click();
+    if (typeof window.startCamera === 'function') {
+      window.startCamera(side);
+    } else {
+      const input = document.getElementById(`input-${side}-camera`);
+      if (input) input.click();
+    }
   };
 
   btnGallery.onclick = () => {
