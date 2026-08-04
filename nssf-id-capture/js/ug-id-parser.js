@@ -691,8 +691,9 @@ function extractMRZ(text) {
         const l1 = lines[i];
         const l2 = lines[i+1];
         const l3 = lines[i+2];
-        if (l1.startsWith('IDUGA') && l1.length >= 28 && l2.length >= 28 && l3.length >= 28) {
-            return [l1, l2, l3];
+        if (l1.includes('IDUGA') && l1.length >= 28 && l2.length >= 28 && l3.length >= 28) {
+            let cleanL1 = l1.substring(l1.indexOf('IDUGA'));
+            return [cleanL1, l2, l3];
         }
     }
     return null; 
@@ -705,24 +706,32 @@ function parseMRZ(mrzLines) {
     let [line1, line2, line3] = mrzLines;
     
     let line1Clean = line1.replace(/\s+/g, '');
-    let nin = line1Clean.substring(15, 29).replace(/</g, '');
-    nin = nin.replace(/O/g, '0');
+    let nin = '';
+    const ninMatch = line1Clean.match(/[CAP][MF][A-Z0-9]{12}/i);
+    if (ninMatch) {
+        nin = ninMatch[0].replace(/O/g, '0');
+    }
     
     let line2Clean = line2.replace(/\s+/g, '');
-    let dobRaw = line2Clean.substring(0, 6)
-        .replace(/D/g, '0')
-        .replace(/O/g, '0')
-        .replace(/I/g, '1')
-        .replace(/S/g, '5')
-        .replace(/B/g, '8')
-        .replace(/Z/g, '2');
-        
-    let sexRaw = line2Clean.substring(7, 8);
-    let nationality = line2Clean.substring(15, 18).replace(/</g, '');
+    let dobRaw = '';
+    let sexRaw = '';
+    const dobSexMatch = line2Clean.match(/([0-9OISBZD]{6})[0-9OISBZD]([MF])/i);
+    if (dobSexMatch) {
+        let rawDate = dobSexMatch[1].toUpperCase();
+        const map = {'O':'0', 'I':'1', 'S':'5', 'B':'8', 'Z':'2', 'D':'0'};
+        dobRaw = rawDate.replace(/[OISBZD]/g, m => map[m]);
+        sexRaw = dobSexMatch[2].toUpperCase();
+    }
+    
+    let nationality = line2Clean.includes('UGA') ? 'UGA' : '';
 
     let line3Clean = line3.replace(/\s+/g, '<');
     line3Clean = line3Clean.replace(/[KLY]{4,}/g, (m) => '<'.repeat(m.length));
     line3Clean = line3Clean.replace(/<K<K/g, '<<').replace(/<K</g, '<<'); 
+    
+    // Fix OCR hallucinating <K before a consonant (e.g. SEKADDEL<KVIVIAN -> SEKADDEL<VIVIAN)
+    line3Clean = line3Clean.replace(/<K(?=[BCDFGJKLMNPQSVXZ])/g, '<');
+
     let namePart = line3Clean; // Removed premature <{3,} truncation which broke valid names
     let surname = '';
     let givenName = '';
@@ -731,6 +740,14 @@ function parseMRZ(mrzLines) {
         let parts = namePart.split('<<');
         surname = parts[0];
         givenName = parts.slice(1).join('<');
+        
+        // If given name is empty, but surname contains <, then Tesseract completely missed the <<
+        // and hallucinated a single < instead (or L<). The << we split on was just trailing padding!
+        if (!givenName.replace(/</g, '').trim() && surname.includes('<')) {
+            let firstIndex = surname.indexOf('<');
+            givenName = surname.substring(firstIndex + 1);
+            surname = surname.substring(0, firstIndex);
+        }
     } else {
         let firstIndex = namePart.indexOf('<');
         if (firstIndex !== -1) {
