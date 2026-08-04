@@ -1001,7 +1001,6 @@ function preprocessROI(croppedCanvas, scaleFactor = 2.5, fieldName = '', layout 
 
   const imgData = ctx.getImageData(0, 0, dstW, dstH);
   const px = imgData.data;
-  const isNewID = layout === 'new';
   if (isNewID && fieldName === 'full_front') {
     for (let i = 0; i < px.length; i += 4) {
       if (px[i] < 90 && px[i + 1] < 90 && px[i + 2] < 90) {
