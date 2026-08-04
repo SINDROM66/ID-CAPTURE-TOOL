@@ -1395,7 +1395,8 @@ async function runOCR() {
 
     if (state.files.front) {
       setProgress(5, 'Loading front of ID…', 'Preparing image');
-      const img = await loadImage(state.files.front);
+      const rawImg = await loadImageNative(state.files.front);
+      const img = capBarcodeImage(rawImg, 2500); // Prevent WASM crash but keep high res
       
       setProgress(7, 'Aligning front of ID…', 'Auto-detecting card edges');
       frontCanvas = await getWarpedCanvasOrFallback(img, 'front');
@@ -1403,7 +1404,8 @@ async function runOCR() {
 
     if (state.files.back) {
       setProgress(50, 'Loading back of ID…', 'Preparing image');
-      const img = await loadImage(state.files.back);
+      const rawImg = await loadImageNative(state.files.back);
+      const img = capBarcodeImage(rawImg, 2500);
 
       setProgress(52, 'Aligning back of ID…', 'Auto-detecting card edges');
       backCanvas = await getWarpedCanvasOrFallback(img, 'back');
@@ -2197,6 +2199,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
+
 
 
 
