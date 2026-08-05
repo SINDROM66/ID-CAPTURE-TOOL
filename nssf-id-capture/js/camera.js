@@ -56,9 +56,18 @@ async function startCamera(side) {
       }
     };
   } catch (err) {
-    console.error("Camera access failed:", err);
-    msg.textContent = "Camera access denied. Please check permissions.";
-    setTimeout(stopCamera, 3000);
+    let errMsg = err.message || err.name || String(err);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        errMsg = "Secure context (HTTPS) required or not supported.";
+    }
+    console.error("Camera access failed:", errMsg, err);
+    msg.textContent = "Camera access failed: " + errMsg + ". Falling back to native camera...";
+    
+    setTimeout(() => {
+      stopCamera();
+      const fallbackInput = document.getElementById(`input-${captureSide}-camera`);
+      if (fallbackInput) fallbackInput.click();
+    }, 2000);
   }
 }
 
